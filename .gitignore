@@ -1,16 +1,5 @@
-# Build output
-bin/
-obj/
-
 # IDE / editor
 .vs/
-*.user
-*.suo
-*.sln.docuser
-
-# NuGet
-*.nupkg
-packages/
 
 # Logs
 .claude/logs/

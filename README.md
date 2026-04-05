@@ -1,10 +1,8 @@
 # ClaudeCode Orchestrator
 
-A hybrid C#/.NET + Python application that orchestrates multi-step Claude Code agent executions with plan management, step queuing, and live output.
+A Python application that orchestrates multi-step Claude Code agent executions with plan management, step queuing, and live output.
 
-## Python Orchestrator
-
-The Python orchestrator (`src/orchestrator/`) provides a tkinter GUI for creating plans, managing step queues, and executing Claude Code agents with context sharing between steps.
+The orchestrator (`src/orchestrator/`) provides a tkinter GUI for creating plans, managing step queues, and executing Claude Code agents with context sharing between steps.
 
 ### Requirements
 
@@ -46,14 +44,4 @@ src/orchestrator/
     settings_dialog.py       # Settings dialog
     import_preview_dialog.py # Import preview with drag-and-drop
     log_viewer.py            # Execution log viewer
-```
-
-## .NET Application
-
-The C# project (`src/ClaudeCodeOrchestrator/`) is the original .NET 9.0 implementation with its own test suite under `src/ClaudeCodeOrchestrator.Tests/`.
-
-### Building
-
-```bash
-dotnet build
 ```
