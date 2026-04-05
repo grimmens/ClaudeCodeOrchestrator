@@ -91,6 +91,10 @@ class Database:
         self.conn.commit()
         return step
 
+    def get_step(self, step_id: str) -> Optional[PlanStep]:
+        row = self.conn.execute("SELECT * FROM plan_steps WHERE id = ?", (step_id,)).fetchone()
+        return self._row_to_step(row) if row else None
+
     def get_steps_for_plan(self, plan_id: str) -> List[PlanStep]:
         rows = self.conn.execute(
             "SELECT * FROM plan_steps WHERE plan_id = ? ORDER BY queue_position", (plan_id,)

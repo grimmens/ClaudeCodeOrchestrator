@@ -1,9 +1,13 @@
+import queue
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
 
+from .config import load_config
 from .database import Database
 from .models import Plan, PlanStep, StepStatus
+from .services.orchestrator import Orchestrator
 from .ui.new_plan_dialog import NewPlanDialog
 from .ui.step_editor_dialog import StepEditorDialog
 
@@ -16,8 +20,15 @@ class OrchestratorApp:
         self.root.minsize(1024, 768)
 
         self.db = Database()
+        self.config = load_config()
+        self.orchestrator = Orchestrator(self.db, self.config)
         self.current_plan: Plan | None = None
         self.steps: list[PlanStep] = []
+
+        # Execution state
+        self._cancel_event = threading.Event()
+        self._running = False
+        self._ui_queue: queue.Queue = queue.Queue()
 
         self._build_ui()
         self._load_plans()
@@ -92,10 +103,13 @@ class OrchestratorApp:
             ("Delete Step", self._delete_step),
             ("Move Up", self._move_step_up),
             ("Move Down", self._move_step_down),
-            ("Run Queue", self._run_queue),
-            ("Stop", self._stop_queue),
         ]:
             ttk.Button(btn_bar, text=text, command=cmd).pack(side=tk.LEFT, padx=2)
+
+        self.run_btn = ttk.Button(btn_bar, text="Run Queue", command=self._run_queue)
+        self.run_btn.pack(side=tk.LEFT, padx=2)
+        self.stop_btn = ttk.Button(btn_bar, text="Stop", command=self._stop_queue, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=2)
 
         # Treeview for steps
         tree_frame = ttk.Frame(parent)
@@ -122,6 +136,14 @@ class OrchestratorApp:
 
         self.step_tree.bind("<<TreeviewSelect>>", self._on_step_selected)
         self.step_tree.bind("<Double-1>", lambda e: self._edit_step())
+
+        # Status color tags
+        self.step_tree.tag_configure("running", background="#fff3cd")
+        self.step_tree.tag_configure("succeeded", background="#d4edda")
+        self.step_tree.tag_configure("failed", background="#f8d7da")
+        self.step_tree.tag_configure("pending", background="")
+        self.step_tree.tag_configure("queued", background="#cce5ff")
+        self.step_tree.tag_configure("skipped", background="#e2e3e5")
 
     def _build_output_viewer(self, parent: ttk.Frame):
         ttk.Label(parent, text="Step Result", font=("Segoe UI", 10, "bold")).pack(padx=5, pady=(5, 2), anchor=tk.W)
@@ -314,10 +336,118 @@ class OrchestratorApp:
             self.step_tree.selection_set(moved_id)
 
     def _run_queue(self):
-        messagebox.showinfo("Run Queue", "Execution not yet implemented.")
+        if not self.current_plan:
+            messagebox.showwarning("Run Queue", "No plan selected.")
+            return
+        if not self.current_plan.project_root:
+            messagebox.showwarning("Run Queue", "Set a project path first.")
+            return
+        pending = [s for s in self.steps if s.status in (StepStatus.PENDING, StepStatus.QUEUED)]
+        if not pending:
+            messagebox.showinfo("Run Queue", "No pending steps to run.")
+            return
+
+        self._running = True
+        self._cancel_event.clear()
+        self.run_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self._set_output_text("")
+
+        plan_id = self.current_plan.id
+
+        def _worker():
+            try:
+                self.orchestrator.execute_queue(
+                    plan_id,
+                    on_step_started=self._on_step_started,
+                    on_step_completed=self._on_step_completed,
+                    on_step_failed=self._on_step_failed,
+                    on_output=self._on_output,
+                    cancel_event=self._cancel_event,
+                )
+            finally:
+                self._ui_queue.put(("done", None))
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        self._poll_ui_queue()
 
     def _stop_queue(self):
-        messagebox.showinfo("Stop", "Execution not yet implemented.")
+        if self._running:
+            self._cancel_event.set()
+            self.status_var.set("Cancelling...")
+
+    # ── Execution Callbacks (called from worker thread) ──────────
+
+    def _on_step_started(self, step: PlanStep, step_num: int, total: int):
+        self._ui_queue.put(("step_started", (step, step_num, total)))
+
+    def _on_step_completed(self, step: PlanStep):
+        self._ui_queue.put(("step_completed", step))
+
+    def _on_step_failed(self, step: PlanStep, error: str):
+        self._ui_queue.put(("step_failed", (step, error)))
+
+    def _on_output(self, text: str):
+        self._ui_queue.put(("output", text))
+
+    # ── UI Queue Polling ─────────────────────────────────────────
+
+    def _poll_ui_queue(self):
+        try:
+            while True:
+                msg_type, data = self._ui_queue.get_nowait()
+                if msg_type == "output":
+                    self._append_output(data)
+                elif msg_type == "step_started":
+                    step, step_num, total = data
+                    self._update_step_row(step)
+                    self.status_var.set(f"Running step {step_num} of {total}: {step.title}")
+                elif msg_type == "step_completed":
+                    self._update_step_row(data)
+                elif msg_type == "step_failed":
+                    step, error = data
+                    self._update_step_row(step)
+                elif msg_type == "done":
+                    self._on_execution_done()
+                    return
+        except queue.Empty:
+            pass
+        if self._running:
+            self.root.after(100, self._poll_ui_queue)
+
+    def _on_execution_done(self):
+        self._running = False
+        self.run_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+        self._load_steps()
+        self._update_status_bar()
+
+        # Summary
+        succeeded = sum(1 for s in self.steps if s.status == StepStatus.SUCCEEDED)
+        failed = sum(1 for s in self.steps if s.status == StepStatus.FAILED)
+        total = len(self.steps)
+        messagebox.showinfo(
+            "Execution Complete",
+            f"Finished: {succeeded} succeeded, {failed} failed, {total} total steps.",
+        )
+
+    def _update_step_row(self, step: PlanStep):
+        """Update a single row in the Treeview to reflect the step's current status."""
+        if self.step_tree.exists(step.id):
+            prompt_preview = (step.prompt[:60] + "\u2026") if len(step.prompt) > 60 else step.prompt
+            self.step_tree.item(step.id, values=(
+                step.queue_position + 1, step.name, step.title, step.status.value, prompt_preview,
+            ))
+            # Color-code by status
+            tag = step.status.value
+            self.step_tree.item(step.id, tags=(tag,))
+
+    def _append_output(self, text: str):
+        self.output_text.config(state=tk.NORMAL)
+        self.output_text.insert(tk.END, text)
+        self.output_text.see(tk.END)
+        self.output_text.config(state=tk.DISABLED)
 
     # ── Helpers ───────────────────────────────────────────────────
 
