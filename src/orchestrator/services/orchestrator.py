@@ -6,7 +6,7 @@ from ..config import Config
 from ..database import Database
 from ..models import AgentRun, PlanStep, StepStatus
 from . import claude_runner
-from .context_builder import build_context
+from .context_builder import build_context, build_history_context
 
 
 # Appended to every step prompt so Claude auto-verifies the project
@@ -97,12 +97,16 @@ class Orchestrator:
 
         started_at = datetime.now().isoformat()
 
-        # Build the full prompt with optional context + auto-verify suffix
+        # Build the full prompt with optional history + step context + auto-verify suffix
         full_prompt = step.prompt + VERIFY_SUFFIX
         if self.include_context and self.config.include_context:
-            context = build_context(self.db, step.plan_id, step.queue_position)
-            if context:
-                full_prompt = context + "TASK:\n" + step.prompt + VERIFY_SUFFIX
+            history_ctx = ""
+            if self.config.include_history_context:
+                history_ctx = build_history_context(self.db, step.plan_id)
+            step_ctx = build_context(self.db, step.plan_id, step.queue_position)
+            prefix = history_ctx + step_ctx
+            if prefix:
+                full_prompt = prefix + "TASK:\n" + step.prompt + VERIFY_SUFFIX
 
         # Run Claude
         exit_code, stdout, stderr = claude_runner.run_claude(

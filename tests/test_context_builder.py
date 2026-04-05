@@ -4,9 +4,13 @@ from src.orchestrator.database import Database
 from src.orchestrator.models import Plan, PlanStep, StepStatus
 from src.orchestrator.services.context_builder import (
     AGGRESSIVE_RESULT_LIMIT,
+    HISTORY_MAX_CHARS,
+    HISTORY_OLD_RESULT_LIMIT,
+    HISTORY_RECENT_RESULT_LIMIT,
     MAX_TOTAL_CHARS,
     NORMAL_RESULT_LIMIT,
     build_context,
+    build_history_context,
 )
 
 
@@ -78,6 +82,86 @@ class TestBuildContext(unittest.TestCase):
         ctx = build_context(self.db, self.plan.id, current_queue_position=1)
         self.assertTrue(ctx.startswith("CONTEXT FROM PREVIOUS STEPS:"))
         self.assertIn("---", ctx)
+
+
+class TestBuildHistoryContext(unittest.TestCase):
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.plan = Plan(name="Main Plan", project_root="/p")
+        self.db.create_plan(self.plan)
+
+    def _add_step(self, pos, name="s", title="T", status=StepStatus.SUCCEEDED, result="ok"):
+        step = PlanStep(plan_id=self.plan.id, queue_position=pos,
+                        name=name, title=title, prompt="p",
+                        status=status, result=result)
+        self.db.create_step(step)
+        return step
+
+    def test_empty_when_no_history(self):
+        ctx = build_history_context(self.db, self.plan.id)
+        self.assertEqual(ctx, "")
+
+    def test_single_snapshot(self):
+        self._add_step(0, name="setup", result="Created project")
+        self.db.create_history_snapshot(self.plan.id, "First run", summary="1 succeeded, 0 failed")
+        ctx = build_history_context(self.db, self.plan.id)
+        self.assertIn("PLAN HISTORY:", ctx)
+        self.assertIn("First run", ctx)
+        self.assertIn("1 succeeded, 0 failed", ctx)
+        self.assertIn("Step 1 (setup): Created project", ctx)
+
+    def test_multiple_snapshots_recent_gets_more_space(self):
+        self._add_step(0, name="s1", result="A" * 500)
+        self.db.create_history_snapshot(self.plan.id, "Old run", summary="old")
+        self.db.create_history_snapshot(self.plan.id, "New run", summary="new")
+        ctx = build_history_context(self.db, self.plan.id)
+        self.assertIn("Old run", ctx)
+        self.assertIn("New run", ctx)
+        # Split by snapshot delimiter and check old vs new truncation
+        # Old snapshot (first) should be truncated more aggressively than new (last)
+        old_section = ctx.split("New run")[0]
+        new_section = ctx.split("New run")[1]
+        self.assertNotIn("A" * (HISTORY_OLD_RESULT_LIMIT + 1), old_section)
+        # New (most recent) should have more result chars
+        self.assertIn("A" * (HISTORY_OLD_RESULT_LIMIT + 1), new_section)
+
+    def test_lineage_history(self):
+        parent = Plan(name="Parent Plan", project_root="/p")
+        self.db.create_plan(parent)
+        parent_step = PlanStep(plan_id=parent.id, queue_position=0, name="ps",
+                               title="PT", prompt="p", status=StepStatus.SUCCEEDED, result="parent ok")
+        self.db.create_step(parent_step)
+        self.db.create_history_snapshot(parent.id, "Parent snapshot")
+
+        child = Plan(name="Child Plan", project_root="/p", parent_plan_id=parent.id)
+        self.db.create_plan(child)
+        ctx = build_history_context(self.db, child.id)
+        self.assertIn("PLAN HISTORY:", ctx)
+        self.assertIn("This plan continues from: Parent Plan", ctx)
+        self.assertIn("1 snapshot(s)", ctx)
+
+    def test_truncation_with_large_history(self):
+        for i in range(20):
+            self._add_step(i, name=f"step{i}", result="Z" * 500)
+        self.db.create_history_snapshot(self.plan.id, "Big snapshot", summary="big")
+        ctx = build_history_context(self.db, self.plan.id, max_chars=500)
+        self.assertLessEqual(len(ctx), 500)
+        self.assertIn("... [truncated]", ctx)
+
+    def test_no_lineage_no_snapshots_returns_empty(self):
+        # Plan with no parent and no snapshots
+        ctx = build_history_context(self.db, self.plan.id)
+        self.assertEqual(ctx, "")
+
+    def test_lineage_only_no_own_snapshots(self):
+        parent = Plan(name="Parent", project_root="/p")
+        self.db.create_plan(parent)
+        self.db.create_history_snapshot(parent.id, "Parent snap")
+        child = Plan(name="Child", project_root="/p", parent_plan_id=parent.id)
+        self.db.create_plan(child)
+        ctx = build_history_context(self.db, child.id)
+        self.assertIn("This plan continues from: Parent", ctx)
+        self.assertIn("1 snapshot(s)", ctx)
 
 
 if __name__ == "__main__":

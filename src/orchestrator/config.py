@@ -11,6 +11,7 @@ DEFAULTS = {
     "allowed_tools": "Read Write Edit Bash Glob Grep",
     "claude_cli_path": "claude",
     "include_context": True,
+    "include_history_context": True,
     "db_path": "orchestrator.db",
     "permission_mode": "override",
 }
@@ -23,6 +24,7 @@ class Config:
     allowed_tools: str = "Read Write Edit Bash Glob Grep"
     claude_cli_path: str = "claude"
     include_context: bool = True
+    include_history_context: bool = True
     db_path: str = "orchestrator.db"
     permission_mode: str = "override"
 

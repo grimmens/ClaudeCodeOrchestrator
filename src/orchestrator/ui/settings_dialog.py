@@ -94,6 +94,13 @@ class SettingsDialog(tk.Toplevel):
             row=row, column=0, columnspan=2, sticky=tk.W, **pad)
         row += 1
 
+        # Include History Context
+        self.history_context_var = tk.BooleanVar()
+        ttk.Checkbutton(frame, text="Include Plan History in Agent Context",
+                        variable=self.history_context_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, **pad)
+        row += 1
+
         # Database Path
         ttk.Label(frame, text="Database Path:").grid(row=row, column=0, sticky=tk.W, **pad)
         self.db_var = tk.StringVar()
@@ -112,6 +119,7 @@ class SettingsDialog(tk.Toplevel):
         self.turns_var.set(self.config.max_turns)
         self.cli_var.set(self.config.claude_cli_path)
         self.context_var.set(self.config.include_context)
+        self.history_context_var.set(self.config.include_history_context)
         self.db_var.set(self.config.db_path)
         self.perm_mode_var.set(self.config.permission_mode)
 
@@ -137,6 +145,7 @@ class SettingsDialog(tk.Toplevel):
         self.config.max_turns = self.turns_var.get()
         self.config.claude_cli_path = self.cli_var.get()
         self.config.include_context = self.context_var.get()
+        self.config.include_history_context = self.history_context_var.get()
         self.config.permission_mode = self.perm_mode_var.get()
 
         # Build allowed_tools string from checkboxes

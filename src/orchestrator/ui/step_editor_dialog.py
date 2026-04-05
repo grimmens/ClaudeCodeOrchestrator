@@ -4,7 +4,7 @@ from typing import Optional
 
 from ..database import Database
 from ..models import PlanStep, StepStatus
-from ..services.context_builder import build_context
+from ..services.context_builder import build_context, build_history_context
 
 
 class StepEditorDialog(tk.Toplevel):
@@ -143,9 +143,11 @@ class StepEditorDialog(tk.Toplevel):
         # Build context if editing an existing step
         full_prompt = prompt
         if not self.is_new and self.step:
-            context = build_context(self.db, self.step.plan_id, self.step.queue_position)
-            if context:
-                full_prompt = context + "TASK:\n" + prompt
+            history_ctx = build_history_context(self.db, self.step.plan_id)
+            step_ctx = build_context(self.db, self.step.plan_id, self.step.queue_position)
+            prefix = history_ctx + step_ctx
+            if prefix:
+                full_prompt = prefix + "TASK:\n" + prompt
 
         # Show in a read-only Toplevel
         preview = tk.Toplevel(self)
