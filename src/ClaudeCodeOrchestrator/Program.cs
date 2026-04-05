@@ -19,6 +19,8 @@ int phase = 1;
 int step = 1;
 bool dryRun = false;
 bool forceReload = false;
+bool listMode = false;
+bool progressMode = false;
 double maxBudget = orchestratorConfig.GetValue<double>("MaxBudgetUsd");
 
 for (int i = 0; i < args.Length; i++)
@@ -35,6 +37,10 @@ for (int i = 0; i < args.Length; i++)
             dryRun = true; break;
         case "--reload":
             forceReload = true; break;
+        case "--list":
+            listMode = true; break;
+        case "--progress":
+            progressMode = true; break;
         case "--budget" or "-b" when i + 1 < args.Length:
             maxBudget = double.Parse(args[++i]); break;
     }
@@ -51,6 +57,34 @@ await db.Database.MigrateAsync();
 var loader = new PlanLoader(db);
 var plan = await loader.LoadOrGetPlanAsync(planFile, forceReload);
 
+// ── --list mode ────────────────────────────────────────────────────────────
+if (listMode)
+{
+    var listTable = new Table()
+        .Title("[bold]Plan Steps[/]")
+        .Border(TableBorder.Rounded)
+        .AddColumn("Phase")
+        .AddColumn("Step")
+        .AddColumn("Name")
+        .AddColumn("Title")
+        .AddColumn("Prompt");
+
+    foreach (var s in plan.Steps.OrderBy(s => s.Phase).ThenBy(s => s.SortOrder))
+    {
+        var prompt = s.Prompt.Length > 80 ? s.Prompt[..80] + "..." : s.Prompt;
+        prompt = prompt.ReplaceLineEndings(" ");
+        listTable.AddRow(
+            new Text(s.Phase.ToString()),
+            new Text(s.Step.ToString()),
+            new Text(s.Name),
+            new Text(s.Title),
+            new Text(prompt));
+    }
+
+    AnsiConsole.Write(listTable);
+    return 0;
+}
+
 var projectRoot = plan.ProjectRoot ?? Directory.GetCurrentDirectory();
 var logDir = Path.Combine(projectRoot, ".claude", "logs");
 
@@ -62,6 +96,51 @@ var allowedTools = orchestratorConfig.GetValue<string>("AllowedTools") ?? "Read 
 var buildChecker = new BuildChecker(buildCommand);
 var agentRunner = new AgentRunner(db, logDir, maxBudget, maxTurns, allowedTools);
 var orchestrator = new Orchestrator(db, agentRunner, buildChecker, projectRoot, logDir);
+
+// ── --progress mode ────────────────────────────────────────────────────────
+if (progressMode)
+{
+    var prog = await orchestrator.GetProgressAsync(plan.Id);
+    var progressTable = new Table()
+        .Title("[bold]Progress[/]")
+        .Border(TableBorder.Rounded)
+        .AddColumn("Phase")
+        .AddColumn("Step")
+        .AddColumn("Name")
+        .AddColumn("Status")
+        .AddColumn("Attempts")
+        .AddColumn("Duration")
+        .AddColumn("Files");
+
+    foreach (var p in prog.Phases)
+    {
+        foreach (var s in p.Steps)
+        {
+            var statusColor = s.Status switch
+            {
+                AgentStatus.Succeeded => "green",
+                AgentStatus.Failed => "red",
+                AgentStatus.Running => "yellow",
+                AgentStatus.BuildCheck or AgentStatus.Fixing => "yellow",
+                AgentStatus.Cancelled => "grey",
+                _ => "dim"
+            };
+            var dur = s.Duration.HasValue ? $"{s.Duration.Value.TotalSeconds:F0}s" : "-";
+            var files = s.FilesChanged > 0 ? s.FilesChanged.ToString() : "-";
+            progressTable.AddRow(
+                new Text(p.Phase.ToString()),
+                new Text(s.Step.ToString()),
+                new Text(s.Name),
+                new Markup($"[{statusColor}]{s.Status}[/]"),
+                new Text(s.AttemptCount.ToString()),
+                new Text(dur),
+                new Text(files));
+        }
+    }
+
+    AnsiConsole.Write(progressTable);
+    return 0;
+}
 
 // ── Execute ─────────────────────────────────────────────────────────────────
 var bannerPanel = new Panel(
