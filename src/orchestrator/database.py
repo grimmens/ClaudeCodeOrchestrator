@@ -67,6 +67,13 @@ class Database:
         row = self.conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
         return Plan(**dict(row)) if row else None
 
+    def update_plan(self, plan: Plan) -> None:
+        self.conn.execute(
+            "UPDATE plans SET name=?, project_root=? WHERE id=?",
+            (plan.name, plan.project_root, plan.id),
+        )
+        self.conn.commit()
+
     def delete_plan(self, plan_id: str) -> None:
         self.conn.execute("DELETE FROM plan_steps WHERE plan_id = ?", (plan_id,))
         self.conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
