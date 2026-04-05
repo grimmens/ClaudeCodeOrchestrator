@@ -95,13 +95,13 @@ public class AgentRunner
             sb.AppendLine();
         }
 
-        sb.AppendLine("WICHTIG:");
-        sb.AppendLine("- Arbeite NUR den unten beschriebenen Schritt ab, nicht mehr.");
-        sb.AppendLine("- Stelle sicher dass 'dotnet build' am Ende ohne Fehler durchlaeuft.");
-        sb.AppendLine("- Committe deine Aenderungen mit einer aussagekraeftigen Commit-Message.");
-        sb.AppendLine("- Wenn du auf Probleme stoesst, behebe sie selbststaendig.");
+        sb.AppendLine("IMPORTANT:");
+        sb.AppendLine("- Work ONLY on the step described below, nothing more.");
+        sb.AppendLine("- Make sure the build passes when you are done.");
+        sb.AppendLine("- Commit your changes with a descriptive commit message.");
+        sb.AppendLine("- If you encounter problems, fix them independently.");
         sb.AppendLine();
-        sb.AppendLine("AUFGABE:");
+        sb.AppendLine("TASK:");
         sb.AppendLine(step.Prompt);
 
         return sb.ToString();
