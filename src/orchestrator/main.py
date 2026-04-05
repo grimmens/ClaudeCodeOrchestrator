@@ -115,6 +115,26 @@ class OrchestratorApp:
         ttk.Checkbutton(btn_bar, text="Include context from previous steps",
                         variable=self.include_context_var).pack(side=tk.LEFT, padx=(10, 2))
 
+        # Toolbar: filter, search, refresh
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(fill=tk.X, padx=5, pady=(2, 0))
+
+        ttk.Label(toolbar, text="Filter:").pack(side=tk.LEFT, padx=(0, 2))
+        self.filter_var = tk.StringVar(value="All")
+        filter_combo = ttk.Combobox(toolbar, textvariable=self.filter_var, width=10,
+                                    values=["All", "Pending", "Running", "Succeeded", "Failed", "Skipped"],
+                                    state="readonly")
+        filter_combo.pack(side=tk.LEFT, padx=2)
+        filter_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_step_filter())
+
+        ttk.Label(toolbar, text="Search:").pack(side=tk.LEFT, padx=(10, 2))
+        self.step_search_var = tk.StringVar()
+        search_entry = ttk.Entry(toolbar, textvariable=self.step_search_var, width=20)
+        search_entry.pack(side=tk.LEFT, padx=2)
+        self.step_search_var.trace_add("write", lambda *_: self._apply_step_filter())
+
+        ttk.Button(toolbar, text="Refresh", command=self._refresh_steps).pack(side=tk.LEFT, padx=(10, 2))
+
         # Treeview for steps
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
@@ -140,25 +160,49 @@ class OrchestratorApp:
 
         self.step_tree.bind("<<TreeviewSelect>>", self._on_step_selected)
         self.step_tree.bind("<Double-1>", lambda e: self._edit_step())
+        self.step_tree.bind("<Button-3>", self._on_step_right_click)
 
         # Status color tags
-        self.step_tree.tag_configure("running", background="#fff3cd")
-        self.step_tree.tag_configure("succeeded", background="#d4edda")
-        self.step_tree.tag_configure("failed", background="#f8d7da")
         self.step_tree.tag_configure("pending", background="")
-        self.step_tree.tag_configure("queued", background="#cce5ff")
-        self.step_tree.tag_configure("skipped", background="#e2e3e5")
+        self.step_tree.tag_configure("queued", background="#E3F2FD")
+        self.step_tree.tag_configure("running", background="#FFF9C4")
+        self.step_tree.tag_configure("succeeded", background="#E8F5E9")
+        self.step_tree.tag_configure("failed", background="#FFEBEE")
+        self.step_tree.tag_configure("skipped", background="#F5F5F5")
+
+        # Right-click context menu
+        self._step_context_menu = tk.Menu(self.step_tree, tearoff=0)
+        self._step_context_menu.add_command(label="Edit Step", command=self._edit_step)
+        self._step_context_menu.add_command(label="Run This Step Only", command=self._run_single_step)
+        self._step_context_menu.add_separator()
+        self._step_context_menu.add_command(label="Skip Step", command=self._skip_step)
+        self._step_context_menu.add_command(label="Reset Step", command=self._reset_step)
+        self._step_context_menu.add_separator()
+        self._step_context_menu.add_command(label="View Full Result", command=self._view_full_result)
+        self._step_context_menu.add_command(label="Copy Result to Clipboard", command=self._copy_result_to_clipboard)
 
     def _build_output_viewer(self, parent: ttk.Frame):
         ttk.Label(parent, text="Step Result", font=("Segoe UI", 10, "bold")).pack(padx=5, pady=(5, 2), anchor=tk.W)
         text_frame = ttk.Frame(parent)
-        text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 2))
 
         self.output_text = tk.Text(text_frame, wrap=tk.WORD, state=tk.DISABLED)
         out_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.output_text.yview)
         self.output_text.configure(yscrollcommand=out_scroll.set)
         out_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.output_text.pack(fill=tk.BOTH, expand=True)
+        self.output_text.tag_configure("search_highlight", background="#FFFF00")
+
+        # Search bar for result text
+        search_bar = ttk.Frame(parent)
+        search_bar.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Label(search_bar, text="Find:").pack(side=tk.LEFT, padx=(0, 2))
+        self.result_search_var = tk.StringVar()
+        result_search_entry = ttk.Entry(search_bar, textvariable=self.result_search_var, width=30)
+        result_search_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Button(search_bar, text="Find", command=self._find_in_result).pack(side=tk.LEFT, padx=2)
+        ttk.Button(search_bar, text="Clear", command=self._clear_result_search).pack(side=tk.LEFT, padx=2)
+        result_search_entry.bind("<Return>", lambda e: self._find_in_result())
 
     # ── Data Loading ─────────────────────────────────────────────
 
@@ -177,10 +221,10 @@ class OrchestratorApp:
             return
         self.steps = self.db.get_steps_for_plan(self.current_plan.id)
         for s in self.steps:
-            prompt_preview = (s.prompt[:60] + "…") if len(s.prompt) > 60 else s.prompt
+            prompt_preview = (s.prompt[:60] + "\u2026") if len(s.prompt) > 60 else s.prompt
             self.step_tree.insert("", tk.END, iid=s.id, values=(
                 s.queue_position + 1, s.name, s.title, s.status.value, prompt_preview,
-            ))
+            ), tags=(s.status.value,))
 
     def _update_status_bar(self):
         if not self.current_plan:
@@ -453,6 +497,150 @@ class OrchestratorApp:
         self.output_text.insert(tk.END, text)
         self.output_text.see(tk.END)
         self.output_text.config(state=tk.DISABLED)
+
+    # ── Toolbar / Filter ─────────────────────────────────────────
+
+    def _apply_step_filter(self):
+        """Rebuild the Treeview showing only steps matching filter + search."""
+        for item in self.step_tree.get_children():
+            self.step_tree.delete(item)
+        status_filter = self.filter_var.get().lower()
+        search_text = self.step_search_var.get().strip().lower()
+        for s in self.steps:
+            if status_filter != "all" and s.status.value != status_filter:
+                continue
+            if search_text and search_text not in s.name.lower() and search_text not in s.title.lower():
+                continue
+            prompt_preview = (s.prompt[:60] + "\u2026") if len(s.prompt) > 60 else s.prompt
+            self.step_tree.insert("", tk.END, iid=s.id, values=(
+                s.queue_position + 1, s.name, s.title, s.status.value, prompt_preview,
+            ), tags=(s.status.value,))
+
+    def _refresh_steps(self):
+        """Reload steps from DB and re-apply filter."""
+        self._load_steps()
+        self._apply_step_filter()
+        self._update_status_bar()
+
+    # ── Context Menu ─────────────────────────────────────────────
+
+    def _on_step_right_click(self, event):
+        row_id = self.step_tree.identify_row(event.y)
+        if row_id:
+            self.step_tree.selection_set(row_id)
+            self._step_context_menu.tk_popup(event.x_root, event.y_root)
+
+    def _get_selected_step(self) -> "PlanStep | None":
+        sel = self.step_tree.selection()
+        if not sel:
+            return None
+        return next((s for s in self.steps if s.id == sel[0]), None)
+
+    def _skip_step(self):
+        step = self._get_selected_step()
+        if not step:
+            return
+        step.status = StepStatus.SKIPPED
+        self.db.update_step(step)
+        self._update_step_row(step)
+
+    def _reset_step(self):
+        step = self._get_selected_step()
+        if not step:
+            return
+        step.status = StepStatus.PENDING
+        step.result = None
+        self.db.update_step(step)
+        self._update_step_row(step)
+        self._set_output_text("No result yet")
+
+    def _view_full_result(self):
+        step = self._get_selected_step()
+        if not step or not step.result:
+            messagebox.showinfo("View Result", "No result available for this step.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title(f"Result: {step.title}")
+        win.geometry("800x600")
+        text_frame = ttk.Frame(win)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        text = tk.Text(text_frame, wrap=tk.WORD)
+        scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(fill=tk.BOTH, expand=True)
+        text.insert("1.0", step.result)
+        text.config(state=tk.DISABLED)
+
+    def _copy_result_to_clipboard(self):
+        step = self._get_selected_step()
+        if not step or not step.result:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(step.result)
+
+    def _run_single_step(self):
+        step = self._get_selected_step()
+        if not step:
+            return
+        if not self.current_plan or not self.current_plan.project_root:
+            messagebox.showwarning("Run Step", "Set a project path first.")
+            return
+        if self._running:
+            messagebox.showwarning("Run Step", "An execution is already running.")
+            return
+
+        self._running = True
+        self._cancel_event.clear()
+        self.run_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self._set_output_text("")
+
+        step_id = step.id
+        self.orchestrator.include_context = self.include_context_var.get()
+
+        def _worker():
+            try:
+                self.orchestrator.execute_single_step(
+                    step_id,
+                    on_step_started=self._on_step_started,
+                    on_step_completed=self._on_step_completed,
+                    on_step_failed=self._on_step_failed,
+                    on_output=self._on_output,
+                    cancel_event=self._cancel_event,
+                )
+            finally:
+                self._ui_queue.put(("done", None))
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        self._poll_ui_queue()
+
+    # ── Result Search ────────────────────────────────────────────
+
+    def _find_in_result(self):
+        """Highlight all occurrences of the search term in the result text."""
+        self.output_text.tag_remove("search_highlight", "1.0", tk.END)
+        term = self.result_search_var.get().strip()
+        if not term:
+            return
+        start = "1.0"
+        first_match = None
+        while True:
+            pos = self.output_text.search(term, start, stopindex=tk.END, nocase=True)
+            if not pos:
+                break
+            if first_match is None:
+                first_match = pos
+            end = f"{pos}+{len(term)}c"
+            self.output_text.tag_add("search_highlight", pos, end)
+            start = end
+        if first_match:
+            self.output_text.see(first_match)
+
+    def _clear_result_search(self):
+        self.result_search_var.set("")
+        self.output_text.tag_remove("search_highlight", "1.0", tk.END)
 
     # ── Helpers ───────────────────────────────────────────────────
 
