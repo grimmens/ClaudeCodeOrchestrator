@@ -13,6 +13,7 @@ from .services.orchestrator import Orchestrator
 from .ui.import_preview_dialog import ImportPreviewDialog
 from .ui.new_plan_dialog import NewPlanDialog
 from .ui.settings_dialog import SettingsDialog
+from .ui.log_viewer import LogViewer
 from .ui.step_editor_dialog import StepEditorDialog
 
 
@@ -188,6 +189,7 @@ class OrchestratorApp:
         ttk.Button(btn_frame, text="New Plan", command=self._new_plan).pack(fill=tk.X, pady=1)
         ttk.Button(btn_frame, text="Delete Plan", command=self._delete_plan).pack(fill=tk.X, pady=1)
         ttk.Button(btn_frame, text="Import JSON", command=self._import_json).pack(fill=tk.X, pady=1)
+        ttk.Button(btn_frame, text="View Logs", command=self._view_logs).pack(fill=tk.X, pady=1)
 
     def _build_step_queue(self, parent: ttk.Frame):
         # Button bar
@@ -276,6 +278,8 @@ class OrchestratorApp:
         self._step_context_menu.add_separator()
         self._step_context_menu.add_command(label="View Full Result", command=self._view_full_result)
         self._step_context_menu.add_command(label="Copy Result to Clipboard", command=self._copy_result_to_clipboard)
+        self._step_context_menu.add_separator()
+        self._step_context_menu.add_command(label="View Run History", command=self._view_step_run_history)
 
     def _build_output_viewer(self, parent: ttk.Frame):
         ttk.Label(parent, text="Step Result", font=("Segoe UI", 10, "bold")).pack(padx=5, pady=(5, 2), anchor=tk.W)
@@ -763,6 +767,20 @@ class OrchestratorApp:
     def _clear_result_search(self):
         self.result_search_var.set("")
         self.output_text.tag_remove("search_highlight", "1.0", tk.END)
+
+    # ── Log Viewer ────────────────────────────────────────────────
+
+    def _view_logs(self):
+        if not self.current_plan:
+            messagebox.showwarning("View Logs", "No plan selected.")
+            return
+        LogViewer(self.root, self.db, self.current_plan.id)
+
+    def _view_step_run_history(self):
+        step = self._get_selected_step()
+        if not step or not self.current_plan:
+            return
+        LogViewer(self.root, self.db, self.current_plan.id, filter_step_id=step.id)
 
     # ── Helpers ───────────────────────────────────────────────────
 

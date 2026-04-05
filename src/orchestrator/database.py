@@ -140,6 +140,27 @@ class Database:
         ).fetchall()
         return [AgentRun(**dict(r)) for r in rows]
 
+    def get_runs_for_plan(self, plan_id: str) -> List[AgentRun]:
+        rows = self.conn.execute(
+            "SELECT ar.* FROM agent_runs ar "
+            "JOIN plan_steps ps ON ar.step_id = ps.id "
+            "WHERE ps.plan_id = ? ORDER BY ar.started_at",
+            (plan_id,),
+        ).fetchall()
+        return [AgentRun(**dict(r)) for r in rows]
+
+    def delete_runs_for_plan(self, plan_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM agent_runs WHERE step_id IN "
+            "(SELECT id FROM plan_steps WHERE plan_id = ?)",
+            (plan_id,),
+        )
+        self.conn.commit()
+
+    def delete_runs_for_step(self, step_id: str) -> None:
+        self.conn.execute("DELETE FROM agent_runs WHERE step_id = ?", (step_id,))
+        self.conn.commit()
+
     @staticmethod
     def _row_to_step(row) -> PlanStep:
         d = dict(row)
