@@ -7,8 +7,10 @@ from datetime import datetime
 from .config import load_config
 from .database import Database
 from .models import Plan, PlanStep, StepStatus
+from .config import save_config
 from .services.orchestrator import Orchestrator
 from .ui.new_plan_dialog import NewPlanDialog
+from .ui.settings_dialog import SettingsDialog
 from .ui.step_editor_dialog import StepEditorDialog
 
 
@@ -30,8 +32,82 @@ class OrchestratorApp:
         self._running = False
         self._ui_queue: queue.Queue = queue.Queue()
 
+        self._build_menu()
         self._build_ui()
         self._load_plans()
+
+    # ── Menu Bar ─────────────────────────────────────────────────
+
+    def _build_menu(self):
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="New Plan", command=self._new_plan)
+        file_menu.add_command(label="Import Plan", command=self._import_json)
+        file_menu.add_command(label="Export Plan", command=self._export_json)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.root.quit)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        # Edit menu
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="Settings", command=self._open_settings)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About", command=self._show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
+
+    # ── Menu Actions ─────────────────────────────────────────────
+
+    def _open_settings(self):
+        def _on_saved():
+            self.include_context_var.set(self.config.include_context)
+            self.orchestrator.config = self.config
+        SettingsDialog(self.root, self.config, on_saved=_on_saved)
+
+    def _export_json(self):
+        if not self.current_plan:
+            messagebox.showwarning("Export Plan", "No plan selected.")
+            return
+        import json
+        path = filedialog.asksaveasfilename(
+            title="Export Plan as JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        steps = self.db.get_steps_for_plan(self.current_plan.id)
+        data = {
+            "name": self.current_plan.name,
+            "project_root": self.current_plan.project_root,
+            "description": self.current_plan.description,
+            "steps": [
+                {
+                    "name": s.name,
+                    "title": s.title,
+                    "prompt": s.prompt,
+                    "description": s.description,
+                    "queue_position": s.queue_position,
+                }
+                for s in steps
+            ],
+        }
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        messagebox.showinfo("Export Plan", f"Plan exported to {path}")
+
+    def _show_about(self):
+        messagebox.showinfo(
+            "About ClaudeCode Orchestrator",
+            "ClaudeCode Orchestrator v0.1\n\n"
+            "A tool for orchestrating multi-step Claude Code tasks\n"
+            "with plan management, step queuing, and build verification.",
+        )
 
     # ── UI Construction ──────────────────────────────────────────
 
