@@ -1,4 +1,3 @@
-import subprocess
 from datetime import datetime
 from threading import Event
 from typing import Callable, Optional
@@ -8,6 +7,16 @@ from ..database import Database
 from ..models import AgentRun, PlanStep, StepStatus
 from . import claude_runner
 from .context_builder import build_context
+
+
+# Appended to every step prompt so Claude auto-verifies the project
+VERIFY_SUFFIX = (
+    "\n\nIMPORTANT: After completing this step, verify that the project still "
+    "builds/runs correctly. Detect the project type from the files present "
+    "(e.g. package.json, *.csproj, *.sln, setup.py, pyproject.toml, Makefile, Cargo.toml, etc.) "
+    "and run the appropriate build/test/lint command. If something breaks, fix it before finishing. "
+    "Commit your changes with a descriptive commit message."
+)
 
 
 class Orchestrator:
@@ -84,12 +93,12 @@ class Orchestrator:
 
         started_at = datetime.now().isoformat()
 
-        # Build the full prompt with optional context
-        full_prompt = step.prompt
+        # Build the full prompt with optional context + auto-verify suffix
+        full_prompt = step.prompt + VERIFY_SUFFIX
         if self.include_context and self.config.include_context:
             context = build_context(self.db, step.plan_id, step.queue_position)
             if context:
-                full_prompt = context + "TASK:\n" + step.prompt
+                full_prompt = context + "TASK:\n" + step.prompt + VERIFY_SUFFIX
 
         # Run Claude
         exit_code, stdout, stderr = claude_runner.run_claude(
@@ -111,10 +120,6 @@ class Orchestrator:
                                     output_text, None, exit_code)
             on_output(f"\n[Step SUCCEEDED]\n")
             on_step_completed(step)
-
-            # Build check
-            if self.config.build_command:
-                self._run_build_check(step, working_dir, on_output, cancel_event)
         else:
             error_msg = stderr or f"Exit code {exit_code}"
             step.status = StepStatus.FAILED
@@ -124,73 +129,6 @@ class Orchestrator:
                                     output_text, error_msg, exit_code)
             on_output(f"\n[Step FAILED: {error_msg[:200]}]\n")
             on_step_failed(step, error_msg)
-
-    def _run_build_check(
-        self,
-        step: PlanStep,
-        working_dir: str,
-        on_output: Callable[[str], None],
-        cancel_event: Event,
-    ) -> None:
-        on_output(f"\n--- Running build check: {self.config.build_command} ---\n")
-        try:
-            result = subprocess.run(
-                self.config.build_command,
-                shell=True,
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode == 0:
-                on_output("[Build OK]\n")
-            else:
-                on_output(f"[Build FAILED]\n{result.stdout}\n{result.stderr}\n")
-                if self.config.auto_fix_build and not cancel_event.is_set():
-                    self._attempt_auto_fix(step, working_dir, result, on_output)
-        except subprocess.TimeoutExpired:
-            on_output("[Build timed out after 120s]\n")
-        except FileNotFoundError:
-            on_output(f"[Build command not found: {self.config.build_command}]\n")
-
-    def _attempt_auto_fix(
-        self,
-        step: PlanStep,
-        working_dir: str,
-        build_result: subprocess.CompletedProcess,
-        on_output: Callable[[str], None],
-    ) -> None:
-        on_output("\n--- Attempting auto-fix ---\n")
-        fix_prompt = (
-            f"The build command `{self.config.build_command}` failed after the previous step. "
-            f"Build output:\n{build_result.stdout}\n{build_result.stderr}\n\n"
-            f"Please fix the build errors."
-        )
-        exit_code, stdout, stderr = claude_runner.run_claude(
-            fix_prompt, working_dir, self.config
-        )
-        if stdout:
-            on_output(stdout)
-        if stderr:
-            on_output(f"\n{stderr}")
-
-        # Re-check build
-        on_output(f"\n--- Re-checking build ---\n")
-        try:
-            recheck = subprocess.run(
-                self.config.build_command,
-                shell=True,
-                cwd=working_dir,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if recheck.returncode == 0:
-                on_output("[Build OK after auto-fix]\n")
-            else:
-                on_output(f"[Build still failing after auto-fix]\n{recheck.stdout}\n{recheck.stderr}\n")
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            on_output(f"[Build re-check error: {e}]\n")
 
     def _create_run_record(
         self,

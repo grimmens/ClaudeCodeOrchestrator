@@ -3,15 +3,16 @@ import os
 from dataclasses import asdict, dataclass, field
 
 
+ALL_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+
 DEFAULTS = {
     "max_budget_usd": 5.0,
     "max_turns": 50,
-    "build_command": "dotnet build",
     "allowed_tools": "Read Write Edit Bash Glob Grep",
     "claude_cli_path": "claude",
     "include_context": True,
-    "auto_fix_build": True,
     "db_path": "orchestrator.db",
+    "permission_mode": "override",
 }
 
 
@@ -19,12 +20,11 @@ DEFAULTS = {
 class Config:
     max_budget_usd: float = 5.0
     max_turns: int = 50
-    build_command: str = "dotnet build"
     allowed_tools: str = "Read Write Edit Bash Glob Grep"
     claude_cli_path: str = "claude"
     include_context: bool = True
-    auto_fix_build: bool = True
     db_path: str = "orchestrator.db"
+    permission_mode: str = "override"
 
 
 def load_config(path: str = "config.json") -> Config:

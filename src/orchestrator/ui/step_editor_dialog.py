@@ -33,6 +33,13 @@ class StepEditorDialog(tk.Toplevel):
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
+        # Buttons — pack at bottom FIRST so they are never clipped
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(8, 8))
+        ttk.Button(btn_frame, text="Save", command=self._save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Preview Full Prompt", command=self._preview_full_prompt).pack(side=tk.LEFT, padx=4)
+
         # Name
         ttk.Label(self, text="Name (kebab-case):").pack(anchor=tk.W, **pad)
         self.name_var = tk.StringVar()
@@ -73,13 +80,6 @@ class StepEditorDialog(tk.Toplevel):
         self.result_text.configure(yscrollcommand=result_scroll.set)
         result_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.result_text.pack(fill=tk.BOTH, expand=True)
-
-        # Buttons
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill=tk.X, **pad, pady=(8, 8))
-        ttk.Button(btn_frame, text="Save", command=self._save).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="Preview Full Prompt", command=self._preview_full_prompt).pack(side=tk.LEFT, padx=4)
 
     def _populate(self, step: PlanStep):
         self.name_var.set(step.name)

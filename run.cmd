@@ -1,2 +1,3 @@
 @echo off
-python src/orchestrator/main.py
+cd /d "%~dp0src"
+python -m orchestrator

@@ -1,6 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/ClaudeCodeOrchestrator.Tests/ClaudeCodeOrchestrator.Tests.csproj" />
-    <Project Path="src/ClaudeCodeOrchestrator/ClaudeCodeOrchestrator.csproj" />
-  </Folder>
-</Solution>

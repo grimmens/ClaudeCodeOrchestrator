@@ -76,10 +76,16 @@ class NewPlanDialog(tk.Toplevel):
         step_btn_frame = ttk.Frame(self)
         step_btn_frame.pack(fill=tk.X, **pad)
         ttk.Button(step_btn_frame, text="Add Step", command=self._add_step_manual).pack(side=tk.LEFT, padx=2)
+        ttk.Button(step_btn_frame, text="Edit Selected", command=self._edit_selected_step).pack(side=tk.LEFT, padx=2)
         ttk.Button(step_btn_frame, text="Delete Selected", command=self._delete_selected_step).pack(side=tk.LEFT, padx=2)
 
+        self.tree.bind("<Double-1>", lambda e: self._edit_selected_step())
+
         # Save button
-        ttk.Button(self, text="Save Plan", command=self._save_plan).pack(pady=10)
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill=tk.X, padx=8, pady=10)
+        ttk.Button(btn_frame, text="Save Plan", command=self._save_plan).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=4)
 
     def _browse_path(self):
         path = filedialog.askdirectory(title="Select Project Root", parent=self)
@@ -150,6 +156,19 @@ class NewPlanDialog(tk.Toplevel):
             self._preview_steps.append(dlg.result)
             self._refresh_tree()
 
+    def _edit_selected_step(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Edit Step", "No step selected.", parent=self)
+            return
+        idx = int(sel[0])
+        existing = self._preview_steps[idx]
+        dlg = _MiniStepDialog(self, existing=existing)
+        self.wait_window(dlg)
+        if dlg.result:
+            self._preview_steps[idx] = dlg.result
+            self._refresh_tree()
+
     def _delete_selected_step(self):
         sel = self.tree.selection()
         if not sel:
@@ -187,30 +206,35 @@ class NewPlanDialog(tk.Toplevel):
 
 
 class _MiniStepDialog(tk.Toplevel):
-    """Small dialog to manually add a step."""
+    """Small dialog to add or edit a step."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, existing: dict = None):
         super().__init__(parent)
-        self.title("Add Step")
-        self.geometry("400x300")
+        self.title("Edit Step" if existing else "Add Step")
+        self.geometry("500x400")
         self.transient(parent)
         self.grab_set()
         self.result = None
 
         pad = {"padx": 8, "pady": 4}
         ttk.Label(self, text="Name (kebab-case):").pack(anchor=tk.W, **pad)
-        self.name_var = tk.StringVar()
+        self.name_var = tk.StringVar(value=existing.get("name", "") if existing else "")
         ttk.Entry(self, textvariable=self.name_var).pack(fill=tk.X, **pad)
 
         ttk.Label(self, text="Title:").pack(anchor=tk.W, **pad)
-        self.title_var = tk.StringVar()
+        self.title_var = tk.StringVar(value=existing.get("title", "") if existing else "")
         ttk.Entry(self, textvariable=self.title_var).pack(fill=tk.X, **pad)
 
         ttk.Label(self, text="Prompt:").pack(anchor=tk.W, **pad)
-        self.prompt_text = tk.Text(self, height=5, wrap=tk.WORD)
+        self.prompt_text = tk.Text(self, height=10, wrap=tk.WORD)
         self.prompt_text.pack(fill=tk.BOTH, expand=True, **pad)
+        if existing and existing.get("prompt"):
+            self.prompt_text.insert("1.0", existing["prompt"])
 
-        ttk.Button(self, text="OK", command=self._ok).pack(pady=8)
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill=tk.X, **pad, pady=(4, 8))
+        ttk.Button(btn_frame, text="Save", command=self._ok).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=4)
 
     def _ok(self):
         name = self.name_var.get().strip()
