@@ -1,15 +1,22 @@
 using ClaudeCodeOrchestrator.Data;
 using ClaudeCodeOrchestrator.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 
-const string ConnectionString = "Server=.;Database=ClaudeCodeOrchestrator;Trusted_Connection=True;TrustServerCertificate=True;";
+var configuration = new ConfigurationBuilder()
+    .SetBasePath(AppContext.BaseDirectory)
+    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+    .Build();
+
+var connectionString = configuration.GetConnectionString("Default")!;
+var orchestratorConfig = configuration.GetSection("Orchestrator");
 
 // ── Parse CLI args ──────────────────────────────────────────────────────────
 string planFile = "todos.json";
 int phase = 1;
 int step = 1;
 bool dryRun = false;
-double maxBudget = 5.00;
+double maxBudget = orchestratorConfig.GetValue<double>("MaxBudgetUsd");
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -30,7 +37,7 @@ for (int i = 0; i < args.Length; i++)
 
 // ── Setup EF Core ───────────────────────────────────────────────────────────
 var optionsBuilder = new DbContextOptionsBuilder<OrchestratorDbContext>();
-optionsBuilder.UseSqlServer(ConnectionString);
+optionsBuilder.UseSqlServer(connectionString);
 
 using var db = new OrchestratorDbContext(optionsBuilder.Options);
 await db.Database.MigrateAsync();
@@ -43,8 +50,12 @@ var projectRoot = plan.ProjectRoot ?? Directory.GetCurrentDirectory();
 var logDir = Path.Combine(projectRoot, ".claude", "logs");
 
 // ── Wire up services ────────────────────────────────────────────────────────
-var buildChecker = new BuildChecker();
-var agentRunner = new AgentRunner(db, logDir, maxBudget);
+var buildCommand = orchestratorConfig.GetValue<string>("BuildCommand") ?? "dotnet build";
+var maxTurns = orchestratorConfig.GetValue<int>("MaxTurns");
+var allowedTools = orchestratorConfig.GetValue<string>("AllowedTools") ?? "Read Write Edit Bash Glob Grep";
+
+var buildChecker = new BuildChecker(buildCommand);
+var agentRunner = new AgentRunner(db, logDir, maxBudget, maxTurns, allowedTools);
 var orchestrator = new Orchestrator(db, agentRunner, buildChecker, projectRoot, logDir);
 
 // ── Console output hooks (placeholder — UX will be fleshed out next) ────────

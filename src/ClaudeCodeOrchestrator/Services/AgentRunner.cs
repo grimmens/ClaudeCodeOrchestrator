@@ -13,12 +13,16 @@ public class AgentRunner
     private readonly OrchestratorDbContext _db;
     private readonly string _logDir;
     private readonly double _maxBudget;
+    private readonly int _maxTurns;
+    private readonly string _allowedTools;
 
-    public AgentRunner(OrchestratorDbContext db, string logDir, double maxBudget = 5.00)
+    public AgentRunner(OrchestratorDbContext db, string logDir, double maxBudget = 5.00, int maxTurns = 50, string allowedTools = "Read Write Edit Bash Glob Grep")
     {
         _db = db;
         _logDir = logDir;
         _maxBudget = maxBudget;
+        _maxTurns = maxTurns;
+        _allowedTools = allowedTools;
     }
 
     public event Action<AgentRun, string>? OnOutput;
@@ -109,7 +113,7 @@ public class AgentRunner
         var psi = new ProcessStartInfo
         {
             FileName = "claude",
-            Arguments = $"-p \"{EscapeForShell(prompt)}\" --allowedTools Read Write Edit Bash Glob Grep --max-turns 50 --max-budget-usd {_maxBudget}",
+            Arguments = $"-p \"{EscapeForShell(prompt)}\" --allowedTools {_allowedTools} --max-turns {_maxTurns} --max-budget-usd {_maxBudget}",
             WorkingDirectory = workingDir,
             RedirectStandardOutput = true,
             RedirectStandardError = true,

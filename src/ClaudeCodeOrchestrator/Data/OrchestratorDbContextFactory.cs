@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
+using Microsoft.Extensions.Configuration;
 
 namespace ClaudeCodeOrchestrator.Data;
 
@@ -10,9 +11,13 @@ public class OrchestratorDbContextFactory : IDesignTimeDbContextFactory<Orchestr
 {
     public OrchestratorDbContext CreateDbContext(string[] args)
     {
+        var configuration = new ConfigurationBuilder()
+            .SetBasePath(AppContext.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+            .Build();
+
         var optionsBuilder = new DbContextOptionsBuilder<OrchestratorDbContext>();
-        optionsBuilder.UseSqlServer(
-            "Server=.;Database=ClaudeCodeOrchestrator;Trusted_Connection=True;TrustServerCertificate=True;");
+        optionsBuilder.UseSqlServer(configuration.GetConnectionString("Default"));
 
         return new OrchestratorDbContext(optionsBuilder.Options);
     }

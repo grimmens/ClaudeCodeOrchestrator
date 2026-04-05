@@ -7,12 +7,20 @@ namespace ClaudeCodeOrchestrator.Services;
 /// </summary>
 public class BuildChecker
 {
+    private readonly string _buildCommand;
+
+    public BuildChecker(string buildCommand = "dotnet build")
+    {
+        _buildCommand = buildCommand;
+    }
+
     public async Task<(bool success, string output)> CheckBuildAsync(string projectRoot, CancellationToken ct = default)
     {
+        var parts = _buildCommand.Split(' ', 2);
         var psi = new ProcessStartInfo
         {
-            FileName = "dotnet",
-            Arguments = "build",
+            FileName = parts[0],
+            Arguments = parts.Length > 1 ? parts[1] : "",
             WorkingDirectory = projectRoot,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
