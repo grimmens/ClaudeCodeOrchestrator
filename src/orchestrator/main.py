@@ -1,10 +1,11 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
 
 from .database import Database
 from .models import Plan, PlanStep, StepStatus
 from .ui.new_plan_dialog import NewPlanDialog
+from .ui.step_editor_dialog import StepEditorDialog
 
 
 class OrchestratorApp:
@@ -228,16 +229,28 @@ class OrchestratorApp:
         if not self.current_plan:
             messagebox.showwarning("Add Step", "No plan selected.")
             return
-        name = simpledialog.askstring("Add Step", "Step name:", parent=self.root)
-        if not name:
-            return
-        title = simpledialog.askstring("Add Step", "Step title:", parent=self.root) or name
-        prompt = simpledialog.askstring("Add Step", "Step prompt:", parent=self.root) or ""
-        pos = len(self.steps)
-        step = PlanStep(plan_id=self.current_plan.id, queue_position=pos, name=name, title=title, prompt=prompt)
-        self.db.create_step(step)
-        self._load_steps()
-        self._update_status_bar()
+        # Insert after the selected step, or at the end
+        sel = self.step_tree.selection()
+        if sel:
+            idx = next((i for i, s in enumerate(self.steps) if s.id == sel[0]), len(self.steps))
+            insert_pos = idx + 1
+        else:
+            insert_pos = len(self.steps)
+
+        def _on_saved():
+            # Reorder: shift steps at insert_pos+ forward, then reload
+            all_steps = self.db.get_steps_for_plan(self.current_plan.id)
+            all_steps.sort(key=lambda s: s.queue_position)
+            self.db.reorder_steps(self.current_plan.id, [s.id for s in all_steps])
+            self._load_steps()
+            self._update_status_bar()
+
+        StepEditorDialog(
+            self.root, self.db, step=None,
+            plan_id=self.current_plan.id,
+            insert_position=insert_pos,
+            on_saved=_on_saved,
+        )
 
     def _edit_step(self):
         sel = self.step_tree.selection()
@@ -247,16 +260,15 @@ class OrchestratorApp:
         step = next((s for s in self.steps if s.id == sel[0]), None)
         if not step:
             return
-        new_title = simpledialog.askstring("Edit Step", "Title:", initialvalue=step.title, parent=self.root)
-        if new_title is None:
-            return
-        new_prompt = simpledialog.askstring("Edit Step", "Prompt:", initialvalue=step.prompt, parent=self.root)
-        if new_prompt is None:
-            return
-        step.title = new_title
-        step.prompt = new_prompt
-        self.db.update_step(step)
-        self._load_steps()
+
+        def _on_saved():
+            self._load_steps()
+            self._update_status_bar()
+
+        StepEditorDialog(
+            self.root, self.db, step=step,
+            on_saved=_on_saved,
+        )
 
     def _delete_step(self):
         sel = self.step_tree.selection()
