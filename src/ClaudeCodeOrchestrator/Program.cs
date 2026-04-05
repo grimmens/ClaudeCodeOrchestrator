@@ -1,7 +1,9 @@
 using ClaudeCodeOrchestrator.Data;
+using ClaudeCodeOrchestrator.Models;
 using ClaudeCodeOrchestrator.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Spectre.Console;
 
 var configuration = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
@@ -61,77 +63,119 @@ var buildChecker = new BuildChecker(buildCommand);
 var agentRunner = new AgentRunner(db, logDir, maxBudget, maxTurns, allowedTools);
 var orchestrator = new Orchestrator(db, agentRunner, buildChecker, projectRoot, logDir);
 
-// ── Console output hooks (placeholder — UX will be fleshed out next) ────────
+// ── Console output hooks ────────────────────────────────────────────────────
 agentRunner.OnOutput += (run, line) =>
 {
-    Console.WriteLine(line);
+    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(line)}[/]");
 };
 
 agentRunner.OnStatusChanged += (run, status) =>
 {
-    Console.WriteLine($"[Agent {run.PlanStep?.Name ?? run.PlanStepId.ToString()}] Status: {status}");
+    var name = Markup.Escape(run.PlanStep?.Name ?? run.PlanStepId.ToString());
+    AnsiConsole.MarkupLine($"[dim]Agent {name} Status: {status}[/]");
 };
 
 orchestrator.OnStepStarted += (planStep, run) =>
 {
-    Console.WriteLine($"=== Phase {planStep.Phase} | Step {planStep.Step}/{plan.Steps.Count(s => s.Phase == planStep.Phase)} | {planStep.Title} ===");
+    var title = Markup.Escape(planStep.Title);
+    var total = plan.Steps.Count(s => s.Phase == planStep.Phase);
+    AnsiConsole.MarkupLine($"[bold cyan]=== Phase {planStep.Phase} | Step {planStep.Step}/{total} | {title} ===[/]");
 };
 
 orchestrator.OnStepCompleted += (planStep, run) =>
 {
-    Console.WriteLine($"[OK] Step {planStep.Step} ({planStep.Name}) completed.");
+    var name = Markup.Escape(planStep.Name);
+    AnsiConsole.MarkupLine($"[green]✓ Step {planStep.Step} ({name}) completed.[/]");
 };
 
 orchestrator.OnStepFailed += (planStep, run) =>
 {
-    Console.WriteLine($"[FAIL] Step {planStep.Step} ({planStep.Name}): {run.ErrorMessage}");
+    var name = Markup.Escape(planStep.Name);
+    var error = Markup.Escape(run.ErrorMessage ?? "unknown error");
+    AnsiConsole.MarkupLine($"[bold red]✗ Step {planStep.Step} ({name}): {error}[/]");
 };
 
 orchestrator.OnBuildCheckStarted += (stepName) =>
 {
-    Console.WriteLine($"[BUILD] Checking build after {stepName}...");
+    var name = Markup.Escape(stepName);
+    AnsiConsole.MarkupLine($"[yellow]BUILD: Checking build after {name}...[/]");
 };
 
 orchestrator.OnBuildCheckCompleted += (success, output) =>
 {
-    Console.WriteLine(success ? "[BUILD] OK" : $"[BUILD] FAILED\n{output}");
+    if (success)
+        AnsiConsole.MarkupLine("[green]BUILD: OK[/]");
+    else
+        AnsiConsole.MarkupLine($"[red]BUILD: FAILED[/]\n{Markup.Escape(output)}");
 };
 
 orchestrator.OnInfo += (msg) =>
 {
-    Console.WriteLine($"[INFO] {msg}");
+    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(msg)}[/]");
 };
 
 // ── Execute ─────────────────────────────────────────────────────────────────
-Console.WriteLine($"Plan: {plan.Name} ({plan.Steps.Count} steps total)");
-Console.WriteLine($"Phase {phase} | Start at step {step} | Budget: ${maxBudget}/step | DryRun: {dryRun}");
-Console.WriteLine();
+var bannerPanel = new Panel(
+    $"[bold]{Markup.Escape(plan.Name)}[/] ({plan.Steps.Count} steps total)\n" +
+    $"Phase [cyan]{phase}[/] | Start at step [cyan]{step}[/] | Budget: [green]${maxBudget}[/]/step | DryRun: {dryRun}")
+{
+    Border = BoxBorder.Rounded,
+    Header = new PanelHeader("[bold blue] Orchestrator [/]"),
+    Padding = new Padding(2, 1)
+};
+AnsiConsole.Write(bannerPanel);
+AnsiConsole.WriteLine();
 
 var result = await orchestrator.ExecutePhaseAsync(plan, phase, step, dryRun);
 
-Console.WriteLine();
-Console.WriteLine(result.Success
-    ? $"Phase {phase} completed: {result.CompletedSteps}/{result.TotalSteps} steps."
-    : $"Phase {phase} failed at step {result.FailedAtStep}: {result.Message}");
-
-if (!result.Success)
+AnsiConsole.WriteLine();
+if (result.Success)
+    AnsiConsole.MarkupLine($"[green]Phase {phase} completed: {result.CompletedSteps}/{result.TotalSteps} steps.[/]");
+else
 {
-    Console.WriteLine($"Resume with: dotnet run -- --phase {phase} --step {result.FailedAtStep}");
+    AnsiConsole.MarkupLine($"[bold red]Phase {phase} failed at step {result.FailedAtStep}: {Markup.Escape(result.Message)}[/]");
+    AnsiConsole.MarkupLine($"[yellow]Resume with: dotnet run -- --phase {phase} --step {result.FailedAtStep}[/]");
 }
 
 // ── Show progress summary ───────────────────────────────────────────────────
 var progress = await orchestrator.GetProgressAsync(plan.Id);
-Console.WriteLine();
-Console.WriteLine("=== Progress Summary ===");
+AnsiConsole.WriteLine();
+
+var table = new Table()
+    .Title("[bold]Progress Summary[/]")
+    .Border(TableBorder.Rounded)
+    .AddColumn("Status")
+    .AddColumn("Step")
+    .AddColumn("Title")
+    .AddColumn("Duration")
+    .AddColumn("Files Changed");
+
 foreach (var p in progress.Phases)
 {
-    Console.WriteLine($"Phase {p.Phase}:");
+    table.AddRow(new Text($"Phase {p.Phase}", new Style(Color.Cyan1)));
+    table.AddEmptyRow();
     foreach (var s in p.Steps)
     {
-        var dur = s.Duration.HasValue ? $" ({s.Duration.Value.TotalSeconds:F0}s)" : "";
-        var files = s.FilesChanged > 0 ? $" [{s.FilesChanged} files]" : "";
-        Console.WriteLine($"  [{s.Status,-10}] {s.Step}. {s.Title}{dur}{files}");
+        var statusColor = s.Status switch
+        {
+            AgentStatus.Succeeded => "green",
+            AgentStatus.Failed => "red",
+            AgentStatus.Running => "yellow",
+            AgentStatus.BuildCheck or AgentStatus.Fixing => "yellow",
+            AgentStatus.Cancelled => "grey",
+            _ => "dim"
+        };
+        var dur = s.Duration.HasValue ? $"{s.Duration.Value.TotalSeconds:F0}s" : "-";
+        var files = s.FilesChanged > 0 ? s.FilesChanged.ToString() : "-";
+        table.AddRow(
+            new Markup($"[{statusColor}]{s.Status}[/]"),
+            new Text(s.Step.ToString()),
+            new Text(s.Title),
+            new Text(dur),
+            new Text(files));
     }
 }
+
+AnsiConsole.Write(table);
 
 return result.Success ? 0 : 1;
