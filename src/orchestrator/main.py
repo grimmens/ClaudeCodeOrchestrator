@@ -4,6 +4,7 @@ from datetime import datetime
 
 from .database import Database
 from .models import Plan, PlanStep, StepStatus
+from .ui.new_plan_dialog import NewPlanDialog
 
 
 class OrchestratorApp:
@@ -189,12 +190,7 @@ class OrchestratorApp:
     # ── Plan Actions ─────────────────────────────────────────────
 
     def _new_plan(self):
-        name = simpledialog.askstring("New Plan", "Plan name:", parent=self.root)
-        if not name:
-            return
-        plan = Plan(name=name)
-        self.db.create_plan(plan)
-        self._load_plans()
+        NewPlanDialog(self.root, self.db, on_saved=self._load_plans)
 
     def _delete_plan(self):
         if not self.current_plan:
