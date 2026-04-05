@@ -22,13 +22,21 @@ public class PlanLoader
         _db = db;
     }
 
-    public async Task<Plan> LoadOrGetPlanAsync(string planFilePath)
+    public async Task<Plan> LoadOrGetPlanAsync(string planFilePath, bool forceReload = false)
     {
         var fullPath = Path.GetFullPath(planFilePath);
 
         var existing = await _db.Plans
             .Include(p => p.Steps)
             .FirstOrDefaultAsync(p => p.SourceFile == fullPath);
+
+        if (existing is not null && forceReload)
+        {
+            _db.PlanSteps.RemoveRange(existing.Steps);
+            _db.Plans.Remove(existing);
+            await _db.SaveChangesAsync();
+            existing = null;
+        }
 
         if (existing is not null)
             return existing;

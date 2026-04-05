@@ -16,6 +16,7 @@ string planFile = "todos.json";
 int phase = 1;
 int step = 1;
 bool dryRun = false;
+bool forceReload = false;
 double maxBudget = orchestratorConfig.GetValue<double>("MaxBudgetUsd");
 
 for (int i = 0; i < args.Length; i++)
@@ -30,6 +31,8 @@ for (int i = 0; i < args.Length; i++)
             step = int.Parse(args[++i]); break;
         case "--dry-run":
             dryRun = true; break;
+        case "--reload":
+            forceReload = true; break;
         case "--budget" or "-b" when i + 1 < args.Length:
             maxBudget = double.Parse(args[++i]); break;
     }
@@ -44,7 +47,7 @@ await db.Database.MigrateAsync();
 
 // ── Load plan ───────────────────────────────────────────────────────────────
 var loader = new PlanLoader(db);
-var plan = await loader.LoadOrGetPlanAsync(planFile);
+var plan = await loader.LoadOrGetPlanAsync(planFile, forceReload);
 
 var projectRoot = plan.ProjectRoot ?? Directory.GetCurrentDirectory();
 var logDir = Path.Combine(projectRoot, ".claude", "logs");

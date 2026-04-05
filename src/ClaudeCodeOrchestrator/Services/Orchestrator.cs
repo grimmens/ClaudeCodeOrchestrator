@@ -97,7 +97,7 @@ public class Orchestrator
                     Step = step.Step,
                     Name = $"{step.Name}_fix",
                     Title = $"Auto-fix for {step.Title}",
-                    Prompt = "Der Build ist fehlgeschlagen. Lies die Build-Fehler mit 'dotnet build' und behebe alle Compile-Errors. Committe den Fix.",
+                    Prompt = "The build failed. Run the build command, read the errors, and fix all compile errors. Commit the fix.",
                     PlanId = plan.Id
                 };
 
