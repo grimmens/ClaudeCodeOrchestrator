@@ -24,6 +24,9 @@ if (lowerArgs.Contains("--help") || lowerArgs.Contains("-h"))
         "  [cyan]--phase[/]     <n>      Phase number to execute [dim](default: 1)[/]\n" +
         "  [cyan]--step, -s[/]  <n>      Step number to start at [dim](default: 1)[/]\n" +
         "  [cyan]--budget, -b[/] <n>     Max budget in USD per step\n" +
+        "  [cyan]--context[/]    <text>   Context preamble prepended to every agent prompt\n" +
+        "  [cyan]--skip[/]       <n>      Mark step n as Skipped (without running) and exit\n" +
+        "  [cyan]--mark-done[/]  <n>      Mark step n as Succeeded (without running) and exit\n" +
         "  [cyan]--dry-run[/]            Preview steps without executing agents\n" +
         "  [cyan]--reload[/]             Force-reload the plan from the JSON file\n" +
         "  [cyan]--list[/]               List all plan steps and exit\n" +
@@ -61,6 +64,9 @@ bool dryRun = false;
 bool forceReload = false;
 bool listMode = false;
 bool progressMode = false;
+string? contextPreamble = null;
+int? skipStep = null;
+int? markDoneStep = null;
 double maxBudget = orchestratorConfig.GetValue<double>("MaxBudgetUsd");
 
 for (int i = 0; i < args.Length; i++)
@@ -83,6 +89,12 @@ for (int i = 0; i < args.Length; i++)
             progressMode = true; break;
         case "--budget" or "-b" when i + 1 < args.Length:
             maxBudget = double.Parse(args[++i]); break;
+        case "--context" when i + 1 < args.Length:
+            contextPreamble = args[++i]; break;
+        case "--skip" when i + 1 < args.Length:
+            skipStep = int.Parse(args[++i]); break;
+        case "--mark-done" when i + 1 < args.Length:
+            markDoneStep = int.Parse(args[++i]); break;
     }
 }
 
@@ -96,6 +108,41 @@ await db.Database.MigrateAsync();
 // ── Load plan ───────────────────────────────────────────────────────────────
 var loader = new PlanLoader(db);
 var plan = await loader.LoadOrGetPlanAsync(planFile, forceReload);
+
+// ── --skip / --mark-done modes ─────────────────────────────────────────────
+if (skipStep.HasValue || markDoneStep.HasValue)
+{
+    var targetStep = skipStep ?? markDoneStep!.Value;
+    var targetStatus = skipStep.HasValue ? AgentStatus.Skipped : AgentStatus.Succeeded;
+    var label = skipStep.HasValue ? "Skipped" : "Succeeded";
+
+    var planStep = plan.Steps
+        .FirstOrDefault(s => s.Phase == phase && s.Step == targetStep);
+
+    if (planStep is null)
+    {
+        AnsiConsole.MarkupLine($"[bold red]Error:[/] Step {targetStep} not found in phase {phase}.");
+        return 1;
+    }
+
+    var attemptNumber = await db.AgentRuns.CountAsync(r => r.PlanStepId == planStep.Id) + 1;
+    var agentRun = new AgentRun
+    {
+        Id = Guid.NewGuid(),
+        PlanStepId = planStep.Id,
+        Status = targetStatus,
+        CreatedAt = DateTime.UtcNow,
+        StartedAt = DateTime.UtcNow,
+        FinishedAt = DateTime.UtcNow,
+        AttemptNumber = attemptNumber
+    };
+
+    db.AgentRuns.Add(agentRun);
+    await db.SaveChangesAsync();
+
+    AnsiConsole.MarkupLine($"[green]Step {targetStep} ({Markup.Escape(planStep.Name)}) marked as {label}.[/]");
+    return 0;
+}
 
 // ── --list mode ────────────────────────────────────────────────────────────
 if (listMode)
@@ -163,6 +210,7 @@ if (progressMode)
                 AgentStatus.Running => "yellow",
                 AgentStatus.BuildCheck or AgentStatus.Fixing => "yellow",
                 AgentStatus.Cancelled => "grey",
+                AgentStatus.Skipped => "blue",
                 _ => "dim"
             };
             var dur = s.Duration.HasValue ? $"{s.Duration.Value.TotalSeconds:F0}s" : "-";
@@ -246,7 +294,7 @@ var result = await AnsiConsole.Status().StartAsync("Initializing...", async ctx 
         ctx.Status($"[dim]{Markup.Escape(msg)}[/]");
     };
 
-    return await orchestrator.ExecutePhaseAsync(plan, phase, step, dryRun);
+    return await orchestrator.ExecutePhaseAsync(plan, phase, step, dryRun, contextPreamble);
 });
 
 AnsiConsole.WriteLine();

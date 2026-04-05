@@ -8,5 +8,6 @@ public enum AgentStatus
     Fixing,
     Succeeded,
     Failed,
-    Cancelled
+    Cancelled,
+    Skipped
 }
