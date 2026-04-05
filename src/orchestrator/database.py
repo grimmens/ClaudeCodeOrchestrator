@@ -1,7 +1,9 @@
+import json
 import sqlite3
+from datetime import datetime
 from typing import List, Optional
 
-from .models import AgentRun, Plan, PlanStep, StepStatus
+from .models import AgentRun, Plan, PlanHistory, PlanStep, StepStatus
 
 
 class Database:
@@ -46,15 +48,32 @@ class Database:
                 cost_usd REAL,
                 FOREIGN KEY (step_id) REFERENCES plan_steps(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS plan_history (
+                id TEXT PRIMARY KEY,
+                plan_id TEXT NOT NULL,
+                snapshot_name TEXT NOT NULL,
+                snapshot_at TEXT NOT NULL,
+                summary TEXT,
+                steps_json TEXT NOT NULL,
+                FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
+            );
         """)
         self.conn.commit()
+
+        # Add parent_plan_id column if it doesn't exist (idempotent migration)
+        try:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN parent_plan_id TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
     # -- Plans --
 
     def create_plan(self, plan: Plan) -> Plan:
         self.conn.execute(
-            "INSERT INTO plans (id, name, project_root, created_at) VALUES (?, ?, ?, ?)",
-            (plan.id, plan.name, plan.project_root, plan.created_at),
+            "INSERT INTO plans (id, name, project_root, created_at, parent_plan_id) VALUES (?, ?, ?, ?, ?)",
+            (plan.id, plan.name, plan.project_root, plan.created_at, plan.parent_plan_id),
         )
         self.conn.commit()
         return plan
@@ -75,6 +94,7 @@ class Database:
         self.conn.commit()
 
     def delete_plan(self, plan_id: str) -> None:
+        self.conn.execute("DELETE FROM plan_history WHERE plan_id = ?", (plan_id,))
         self.conn.execute("DELETE FROM plan_steps WHERE plan_id = ?", (plan_id,))
         self.conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
         self.conn.commit()
@@ -159,6 +179,63 @@ class Database:
 
     def delete_runs_for_step(self, step_id: str) -> None:
         self.conn.execute("DELETE FROM agent_runs WHERE step_id = ?", (step_id,))
+        self.conn.commit()
+
+    # -- Plan History --
+
+    def create_history_snapshot(self, plan_id: str, snapshot_name: str, summary: str | None = None) -> PlanHistory:
+        steps = self.get_steps_for_plan(plan_id)
+        steps_data = [
+            {
+                "id": s.id,
+                "plan_id": s.plan_id,
+                "queue_position": s.queue_position,
+                "name": s.name,
+                "title": s.title,
+                "prompt": s.prompt,
+                "description": s.description,
+                "result": s.result,
+                "status": s.status.value,
+            }
+            for s in steps
+        ]
+        snapshot = PlanHistory(
+            plan_id=plan_id,
+            snapshot_name=snapshot_name,
+            summary=summary,
+            steps_json=json.dumps(steps_data),
+        )
+        self.conn.execute(
+            "INSERT INTO plan_history (id, plan_id, snapshot_name, snapshot_at, summary, steps_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (snapshot.id, snapshot.plan_id, snapshot.snapshot_name,
+             snapshot.snapshot_at, snapshot.summary, snapshot.steps_json),
+        )
+        self.conn.commit()
+        return snapshot
+
+    def get_history_for_plan(self, plan_id: str) -> List[PlanHistory]:
+        rows = self.conn.execute(
+            "SELECT * FROM plan_history WHERE plan_id = ? ORDER BY snapshot_at",
+            (plan_id,),
+        ).fetchall()
+        return [PlanHistory(**dict(r)) for r in rows]
+
+    def get_full_lineage_history(self, plan_id: str) -> List[PlanHistory]:
+        all_history: List[PlanHistory] = []
+        current_id: str | None = plan_id
+        visited: set[str] = set()
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            all_history.extend(self.get_history_for_plan(current_id))
+            plan = self.get_plan(current_id)
+            current_id = plan.parent_plan_id if plan else None
+        # Sort all collected history by snapshot_at
+        all_history.sort(key=lambda h: h.snapshot_at)
+        return all_history
+
+    def delete_history_snapshot(self, snapshot_id: str) -> None:
+        self.conn.execute("DELETE FROM plan_history WHERE id = ?", (snapshot_id,))
         self.conn.commit()
 
     @staticmethod

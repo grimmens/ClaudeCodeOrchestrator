@@ -1,7 +1,8 @@
+import json
 import unittest
 
 from src.orchestrator.database import Database
-from src.orchestrator.models import AgentRun, Plan, PlanStep, StepStatus
+from src.orchestrator.models import AgentRun, Plan, PlanHistory, PlanStep, StepStatus
 
 
 class TestDatabasePlans(unittest.TestCase):
@@ -139,6 +140,87 @@ class TestDatabaseAgentRuns(unittest.TestCase):
         self.db.create_agent_run(run)
         self.db.delete_runs_for_plan(self.plan.id)
         self.assertEqual(self.db.get_runs_for_step(self.step.id), [])
+
+
+class TestDatabasePlanHistory(unittest.TestCase):
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.plan = Plan(name="P", project_root="/p")
+        self.db.create_plan(self.plan)
+        # Add some steps
+        self.step1 = PlanStep(plan_id=self.plan.id, name="s1", title="Step 1",
+                              prompt="do thing 1", status=StepStatus.SUCCEEDED, result="ok")
+        self.step2 = PlanStep(plan_id=self.plan.id, name="s2", title="Step 2",
+                              prompt="do thing 2", queue_position=1, status=StepStatus.FAILED,
+                              result="error")
+        self.db.create_step(self.step1)
+        self.db.create_step(self.step2)
+
+    def test_create_and_get_snapshot(self):
+        snapshot = self.db.create_history_snapshot(self.plan.id, "v1", summary="test run")
+        self.assertEqual(snapshot.plan_id, self.plan.id)
+        self.assertEqual(snapshot.snapshot_name, "v1")
+        self.assertEqual(snapshot.summary, "test run")
+        steps_data = json.loads(snapshot.steps_json)
+        self.assertEqual(len(steps_data), 2)
+        self.assertEqual(steps_data[0]["status"], "succeeded")
+        self.assertEqual(steps_data[1]["status"], "failed")
+
+    def test_get_history_for_plan(self):
+        self.db.create_history_snapshot(self.plan.id, "snap1")
+        self.db.create_history_snapshot(self.plan.id, "snap2")
+        history = self.db.get_history_for_plan(self.plan.id)
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0].snapshot_name, "snap1")
+        self.assertEqual(history[1].snapshot_name, "snap2")
+
+    def test_delete_history_snapshot(self):
+        snapshot = self.db.create_history_snapshot(self.plan.id, "to-delete")
+        self.db.delete_history_snapshot(snapshot.id)
+        history = self.db.get_history_for_plan(self.plan.id)
+        self.assertEqual(len(history), 0)
+
+    def test_cascade_delete_on_plan_delete(self):
+        self.db.create_history_snapshot(self.plan.id, "snap")
+        self.db.delete_plan(self.plan.id)
+        history = self.db.get_history_for_plan(self.plan.id)
+        self.assertEqual(len(history), 0)
+
+    def test_lineage_history(self):
+        # Create a parent plan with history
+        parent = Plan(name="Parent", project_root="/p",
+                      created_at="2024-01-01T00:00:00")
+        self.db.create_plan(parent)
+        parent_step = PlanStep(plan_id=parent.id, name="ps", title="PT", prompt="pp",
+                               status=StepStatus.SUCCEEDED)
+        self.db.create_step(parent_step)
+        self.db.create_history_snapshot(parent.id, "parent-snap")
+
+        # Create a child plan linked to parent
+        child = Plan(name="Child", project_root="/p",
+                     created_at="2024-02-01T00:00:00", parent_plan_id=parent.id)
+        self.db.create_plan(child)
+        child_step = PlanStep(plan_id=child.id, name="cs", title="CT", prompt="cp",
+                              status=StepStatus.SUCCEEDED)
+        self.db.create_step(child_step)
+        self.db.create_history_snapshot(child.id, "child-snap")
+
+        # Lineage from child should include both
+        lineage = self.db.get_full_lineage_history(child.id)
+        self.assertEqual(len(lineage), 2)
+        names = [h.snapshot_name for h in lineage]
+        self.assertIn("parent-snap", names)
+        self.assertIn("child-snap", names)
+
+    def test_parent_plan_id_stored_and_retrieved(self):
+        child = Plan(name="Child", project_root="/c", parent_plan_id=self.plan.id)
+        self.db.create_plan(child)
+        fetched = self.db.get_plan(child.id)
+        self.assertEqual(fetched.parent_plan_id, self.plan.id)
+
+    def test_parent_plan_id_null_by_default(self):
+        fetched = self.db.get_plan(self.plan.id)
+        self.assertIsNone(fetched.parent_plan_id)
 
 
 if __name__ == "__main__":

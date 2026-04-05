@@ -51,6 +51,10 @@ class Orchestrator:
                                on_step_started, on_step_completed, on_step_failed,
                                on_output, cancel_event)
 
+        # Auto-snapshot after queue run completes
+        if not cancel_event.is_set() and runnable:
+            self._auto_snapshot(plan_id, runnable)
+
     def execute_single_step(
         self,
         step_id: str,
@@ -153,3 +157,17 @@ class Orchestrator:
             exit_code=exit_code,
         )
         self.db.create_agent_run(run)
+
+    def _auto_snapshot(self, plan_id: str, executed_steps: list[PlanStep]) -> None:
+        # Re-read steps to get final statuses
+        steps = self.db.get_steps_for_plan(plan_id)
+        executed_ids = {s.id for s in executed_steps}
+        relevant = [s for s in steps if s.id in executed_ids]
+        succeeded = sum(1 for s in relevant if s.status == StepStatus.SUCCEEDED)
+        failed = sum(1 for s in relevant if s.status == StepStatus.FAILED)
+        summary = f"{succeeded} succeeded, {failed} failed out of {len(relevant)} steps"
+        self.db.create_history_snapshot(
+            plan_id,
+            "Auto-snapshot after queue run",
+            summary=summary,
+        )

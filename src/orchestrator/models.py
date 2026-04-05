@@ -20,6 +20,7 @@ class Plan:
     name: str = ""
     project_root: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    parent_plan_id: Optional[str] = None
 
 
 @dataclass
@@ -33,6 +34,16 @@ class PlanStep:
     description: Optional[str] = None
     result: Optional[str] = None
     status: StepStatus = StepStatus.PENDING
+
+
+@dataclass
+class PlanHistory:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    plan_id: str = ""
+    snapshot_name: str = ""
+    snapshot_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    summary: Optional[str] = None
+    steps_json: str = "[]"
 
 
 @dataclass
