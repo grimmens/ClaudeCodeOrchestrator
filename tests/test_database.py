@@ -1,0 +1,145 @@
+import unittest
+
+from src.orchestrator.database import Database
+from src.orchestrator.models import AgentRun, Plan, PlanStep, StepStatus
+
+
+class TestDatabasePlans(unittest.TestCase):
+    def setUp(self):
+        self.db = Database(":memory:")
+
+    def test_create_and_get_plan(self):
+        plan = Plan(name="Test Plan", project_root="/tmp/proj")
+        self.db.create_plan(plan)
+        fetched = self.db.get_plan(plan.id)
+        self.assertIsNotNone(fetched)
+        self.assertEqual(fetched.name, "Test Plan")
+        self.assertEqual(fetched.project_root, "/tmp/proj")
+
+    def test_get_plans_ordered_by_date(self):
+        p1 = Plan(name="First", project_root="/a", created_at="2024-01-01T00:00:00")
+        p2 = Plan(name="Second", project_root="/b", created_at="2024-02-01T00:00:00")
+        self.db.create_plan(p1)
+        self.db.create_plan(p2)
+        plans = self.db.get_plans()
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(plans[0].name, "Second")  # newest first
+
+    def test_update_plan(self):
+        plan = Plan(name="Old Name", project_root="/old")
+        self.db.create_plan(plan)
+        plan.name = "New Name"
+        plan.project_root = "/new"
+        self.db.update_plan(plan)
+        fetched = self.db.get_plan(plan.id)
+        self.assertEqual(fetched.name, "New Name")
+        self.assertEqual(fetched.project_root, "/new")
+
+    def test_delete_plan_cascades_steps(self):
+        plan = Plan(name="P", project_root="/p")
+        self.db.create_plan(plan)
+        step = PlanStep(plan_id=plan.id, name="s1", title="T", prompt="do it")
+        self.db.create_step(step)
+        self.db.delete_plan(plan.id)
+        self.assertIsNone(self.db.get_plan(plan.id))
+        self.assertEqual(self.db.get_steps_for_plan(plan.id), [])
+
+    def test_get_nonexistent_plan(self):
+        self.assertIsNone(self.db.get_plan("nonexistent"))
+
+
+class TestDatabaseSteps(unittest.TestCase):
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.plan = Plan(name="P", project_root="/p")
+        self.db.create_plan(self.plan)
+
+    def _make_step(self, **kwargs):
+        defaults = dict(plan_id=self.plan.id, name="s", title="T", prompt="p")
+        defaults.update(kwargs)
+        return PlanStep(**defaults)
+
+    def test_create_and_get_step(self):
+        step = self._make_step(name="step1", title="Step One")
+        self.db.create_step(step)
+        fetched = self.db.get_step(step.id)
+        self.assertIsNotNone(fetched)
+        self.assertEqual(fetched.name, "step1")
+        self.assertEqual(fetched.status, StepStatus.PENDING)
+
+    def test_get_steps_ordered_by_position(self):
+        s1 = self._make_step(name="a", queue_position=1)
+        s2 = self._make_step(name="b", queue_position=0)
+        self.db.create_step(s1)
+        self.db.create_step(s2)
+        steps = self.db.get_steps_for_plan(self.plan.id)
+        self.assertEqual(steps[0].name, "b")
+        self.assertEqual(steps[1].name, "a")
+
+    def test_update_step_status(self):
+        step = self._make_step()
+        self.db.create_step(step)
+        step.status = StepStatus.SUCCEEDED
+        step.result = "All done"
+        self.db.update_step(step)
+        fetched = self.db.get_step(step.id)
+        self.assertEqual(fetched.status, StepStatus.SUCCEEDED)
+        self.assertEqual(fetched.result, "All done")
+
+    def test_delete_step(self):
+        step = self._make_step()
+        self.db.create_step(step)
+        self.db.delete_step(step.id)
+        self.assertIsNone(self.db.get_step(step.id))
+
+    def test_reorder_steps(self):
+        s1 = self._make_step(name="first", queue_position=0)
+        s2 = self._make_step(name="second", queue_position=1)
+        s3 = self._make_step(name="third", queue_position=2)
+        for s in (s1, s2, s3):
+            self.db.create_step(s)
+        # Reverse order
+        self.db.reorder_steps(self.plan.id, [s3.id, s2.id, s1.id])
+        steps = self.db.get_steps_for_plan(self.plan.id)
+        self.assertEqual([s.name for s in steps], ["third", "second", "first"])
+
+
+class TestDatabaseAgentRuns(unittest.TestCase):
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.plan = Plan(name="P", project_root="/p")
+        self.db.create_plan(self.plan)
+        self.step = PlanStep(plan_id=self.plan.id, name="s", title="T", prompt="p")
+        self.db.create_step(self.step)
+
+    def test_create_and_get_run(self):
+        run = AgentRun(step_id=self.step.id, attempt_number=1, status="succeeded",
+                       output="ok", exit_code=0, cost_usd=0.05)
+        self.db.create_agent_run(run)
+        runs = self.db.get_runs_for_step(self.step.id)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].status, "succeeded")
+        self.assertEqual(runs[0].cost_usd, 0.05)
+
+    def test_get_runs_for_plan(self):
+        run = AgentRun(step_id=self.step.id, attempt_number=1, status="done",
+                       started_at="2024-01-01T00:00:00")
+        self.db.create_agent_run(run)
+        runs = self.db.get_runs_for_plan(self.plan.id)
+        self.assertEqual(len(runs), 1)
+
+    def test_delete_runs_for_step(self):
+        run = AgentRun(step_id=self.step.id, attempt_number=1, status="done")
+        self.db.create_agent_run(run)
+        self.db.delete_runs_for_step(self.step.id)
+        self.assertEqual(self.db.get_runs_for_step(self.step.id), [])
+
+    def test_delete_runs_for_plan(self):
+        run = AgentRun(step_id=self.step.id, attempt_number=1, status="done")
+        self.db.create_agent_run(run)
+        self.db.delete_runs_for_plan(self.plan.id)
+        self.assertEqual(self.db.get_runs_for_step(self.step.id), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
