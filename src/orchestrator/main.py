@@ -14,6 +14,7 @@ from .services.json_parser import extract_json_steps
 from .ui.import_preview_dialog import ImportPreviewDialog
 from .ui.new_plan_dialog import NewPlanDialog
 from .ui.settings_dialog import SettingsDialog
+from .ui.history_viewer import HistoryViewer
 from .ui.log_viewer import LogViewer
 from .ui.step_editor_dialog import StepEditorDialog
 
@@ -58,6 +59,8 @@ class OrchestratorApp:
         # Edit menu
         edit_menu = tk.Menu(menubar, tearoff=0)
         edit_menu.add_command(label="Settings", command=self._open_settings)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Create Snapshot", command=self._create_snapshot_from_menu)
         menubar.add_cascade(label="Edit", menu=edit_menu)
 
         # Help menu
@@ -190,6 +193,15 @@ class OrchestratorApp:
         ttk.Button(btn_frame, text="Delete Plan", command=self._delete_plan).pack(fill=tk.X, pady=1)
         ttk.Button(btn_frame, text="Import JSON", command=self._import_json).pack(fill=tk.X, pady=1)
         ttk.Button(btn_frame, text="View Logs", command=self._view_logs).pack(fill=tk.X, pady=1)
+        ttk.Button(btn_frame, text="History", command=self._view_history).pack(fill=tk.X, pady=1)
+
+        # Right-click context menu on plan listbox
+        self._plan_context_menu = tk.Menu(self.plan_listbox, tearoff=0)
+        self._plan_context_menu.add_command(label="View History", command=self._view_history)
+        self._plan_context_menu.add_command(label="View Logs", command=self._view_logs)
+        self._plan_context_menu.add_separator()
+        self._plan_context_menu.add_command(label="Delete Plan", command=self._delete_plan)
+        self.plan_listbox.bind("<Button-3>", self._on_plan_right_click)
 
     def _build_step_queue(self, parent: ttk.Frame):
         # Button bar
@@ -280,6 +292,7 @@ class OrchestratorApp:
         self._step_context_menu.add_command(label="Copy Result to Clipboard", command=self._copy_result_to_clipboard)
         self._step_context_menu.add_separator()
         self._step_context_menu.add_command(label="View Run History", command=self._view_step_run_history)
+        self._step_context_menu.add_command(label="View History for This Step", command=self._view_history_for_step)
 
     def _build_output_viewer(self, parent: ttk.Frame):
         ttk.Label(parent, text="Step Result", font=("Segoe UI", 10, "bold")).pack(padx=5, pady=(5, 2), anchor=tk.W)
@@ -920,6 +933,43 @@ class OrchestratorApp:
         if not step or not self.current_plan:
             return
         LogViewer(self.root, self.db, self.current_plan.id, filter_step_id=step.id)
+
+    # ── History ────────────────────────────────────────────────────
+
+    def _view_history(self):
+        if not self.current_plan:
+            messagebox.showwarning("View History", "No plan selected.")
+            return
+        HistoryViewer(self.root, self.db, self.current_plan.id)
+
+    def _view_history_for_step(self):
+        step = self._get_selected_step()
+        if not step or not self.current_plan:
+            return
+        HistoryViewer(self.root, self.db, self.current_plan.id,
+                      auto_select_step_name=step.name)
+
+    def _create_snapshot_from_menu(self):
+        if not self.current_plan:
+            messagebox.showwarning("Create Snapshot", "No plan selected.")
+            return
+        from tkinter import simpledialog
+        name = simpledialog.askstring("Create Snapshot",
+                                      "Snapshot name:", parent=self.root)
+        if not name:
+            return
+        summary = simpledialog.askstring("Create Snapshot",
+                                         "Summary (optional):", parent=self.root)
+        self.db.create_history_snapshot(self.current_plan.id, name, summary or None)
+        messagebox.showinfo("Create Snapshot", f"Snapshot '{name}' created.")
+
+    def _on_plan_right_click(self, event):
+        idx = self.plan_listbox.nearest(event.y)
+        if idx >= 0:
+            self.plan_listbox.selection_clear(0, tk.END)
+            self.plan_listbox.selection_set(idx)
+            self.plan_listbox.event_generate("<<ListboxSelect>>")
+            self._plan_context_menu.tk_popup(event.x_root, event.y_root)
 
     # ── Helpers ───────────────────────────────────────────────────
 
