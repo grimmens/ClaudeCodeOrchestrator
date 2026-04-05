@@ -111,6 +111,10 @@ class OrchestratorApp:
         self.stop_btn = ttk.Button(btn_bar, text="Stop", command=self._stop_queue, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=2)
 
+        self.include_context_var = tk.BooleanVar(value=self.config.include_context)
+        ttk.Checkbutton(btn_bar, text="Include context from previous steps",
+                        variable=self.include_context_var).pack(side=tk.LEFT, padx=(10, 2))
+
         # Treeview for steps
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
@@ -354,6 +358,7 @@ class OrchestratorApp:
         self._set_output_text("")
 
         plan_id = self.current_plan.id
+        self.orchestrator.include_context = self.include_context_var.get()
 
         def _worker():
             try:

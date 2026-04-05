@@ -7,12 +7,14 @@ from ..config import Config
 from ..database import Database
 from ..models import AgentRun, PlanStep, StepStatus
 from . import claude_runner
+from .context_builder import build_context
 
 
 class Orchestrator:
-    def __init__(self, db: Database, config: Config):
+    def __init__(self, db: Database, config: Config, include_context: bool = True):
         self.db = db
         self.config = config
+        self.include_context = include_context
 
     def execute_queue(
         self,
@@ -82,9 +84,16 @@ class Orchestrator:
 
         started_at = datetime.now().isoformat()
 
+        # Build the full prompt with optional context
+        full_prompt = step.prompt
+        if self.include_context and self.config.include_context:
+            context = build_context(self.db, step.plan_id, step.queue_position)
+            if context:
+                full_prompt = context + "TASK:\n" + step.prompt
+
         # Run Claude
         exit_code, stdout, stderr = claude_runner.run_claude(
-            step.prompt, working_dir, self.config
+            full_prompt, working_dir, self.config
         )
 
         finished_at = datetime.now().isoformat()

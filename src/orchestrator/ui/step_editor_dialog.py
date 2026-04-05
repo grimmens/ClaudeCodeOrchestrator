@@ -4,6 +4,7 @@ from typing import Optional
 
 from ..database import Database
 from ..models import PlanStep, StepStatus
+from ..services.context_builder import build_context
 
 
 class StepEditorDialog(tk.Toplevel):
@@ -78,6 +79,7 @@ class StepEditorDialog(tk.Toplevel):
         btn_frame.pack(fill=tk.X, **pad, pady=(8, 8))
         ttk.Button(btn_frame, text="Save", command=self._save).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Preview Full Prompt", command=self._preview_full_prompt).pack(side=tk.LEFT, padx=4)
 
     def _populate(self, step: PlanStep):
         self.name_var.set(step.name)
@@ -132,3 +134,32 @@ class StepEditorDialog(tk.Toplevel):
         if self.on_saved:
             self.on_saved()
         self.destroy()
+
+    def _preview_full_prompt(self):
+        prompt = self.prompt_text.get("1.0", tk.END).strip()
+        if not prompt:
+            prompt = "(empty prompt)"
+
+        # Build context if editing an existing step
+        full_prompt = prompt
+        if not self.is_new and self.step:
+            context = build_context(self.db, self.step.plan_id, self.step.queue_position)
+            if context:
+                full_prompt = context + "TASK:\n" + prompt
+
+        # Show in a read-only Toplevel
+        preview = tk.Toplevel(self)
+        preview.title("Full Prompt Preview")
+        preview.geometry("800x600")
+        preview.transient(self)
+
+        text = tk.Text(preview, wrap=tk.WORD, state=tk.NORMAL)
+        scroll = ttk.Scrollbar(preview, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(fill=tk.BOTH, expand=True)
+
+        text.insert("1.0", full_prompt)
+        text.config(state=tk.DISABLED)
+
+        ttk.Button(preview, text="Close", command=preview.destroy).pack(pady=5)
