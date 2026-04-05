@@ -11,7 +11,9 @@
       "Bash(taskkill //F //IM python.exe)",
       "Bash(python -m orchestrator)",
       "Bash(python -c \"from orchestrator.config import Config, ALL_TOOLS; from orchestrator.ui.settings_dialog import SettingsDialog; print\\('imports OK'\\)\")",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(python -c \"from src.orchestrator.services.json_parser import extract_json_steps; print\\('Import OK'\\)\")",
+      "Bash(python -m pytest tests/ -q)"
     ]
   }
 }

@@ -10,6 +10,7 @@ from .database import Database
 from .models import Plan, PlanStep, StepStatus
 from .config import save_config
 from .services.orchestrator import Orchestrator
+from .services.json_parser import extract_json_steps
 from .ui.import_preview_dialog import ImportPreviewDialog
 from .ui.new_plan_dialog import NewPlanDialog
 from .ui.settings_dialog import SettingsDialog
@@ -30,10 +31,9 @@ class OrchestratorApp:
         self.current_plan: Plan | None = None
         self.steps: list[PlanStep] = []
 
-        # Execution state
-        self._cancel_event = threading.Event()
-        self._running = False
-        self._ui_queue: queue.Queue = queue.Queue()
+        # Per-plan execution state: plan_id -> {cancel_event, ui_queue, output_lines}
+        self._plan_executions: dict[str, dict] = {}
+        self._polling = False
 
         self._build_menu()
         self._build_ui()
@@ -307,11 +307,20 @@ class OrchestratorApp:
     # ── Data Loading ─────────────────────────────────────────────
 
     def _load_plans(self):
+        # Remember current selection
+        cur_sel = self.plan_listbox.curselection()
+        cur_idx = cur_sel[0] if cur_sel else None
+
         self.plan_listbox.delete(0, tk.END)
         self._plans = self.db.get_plans()
         for p in self._plans:
             created = p.created_at[:10] if p.created_at else ""
-            self.plan_listbox.insert(tk.END, f"{p.name}  ({created})")
+            running = "  [RUNNING]" if p.id in self._plan_executions else ""
+            self.plan_listbox.insert(tk.END, f"{p.name}  ({created}){running}")
+
+        # Restore selection
+        if cur_idx is not None and cur_idx < len(self._plans):
+            self.plan_listbox.selection_set(cur_idx)
 
     def _load_steps(self):
         for item in self.step_tree.get_children():
@@ -326,16 +335,31 @@ class OrchestratorApp:
                 s.queue_position + 1, s.name, s.title, s.status.value, prompt_preview,
             ), tags=(s.status.value,))
 
+    def _is_plan_running(self, plan_id: str | None = None) -> bool:
+        pid = plan_id or (self.current_plan.id if self.current_plan else None)
+        return pid is not None and pid in self._plan_executions
+
+    def _sync_run_buttons(self):
+        """Update Run/Stop button state based on the currently selected plan."""
+        if self._is_plan_running():
+            self.run_btn.config(state=tk.DISABLED)
+            self.stop_btn.config(state=tk.NORMAL)
+        else:
+            self.run_btn.config(state=tk.NORMAL)
+            self.stop_btn.config(state=tk.DISABLED)
+
     def _update_status_bar(self):
         if not self.current_plan:
             self.status_var.set("No plan selected")
             return
         total = len(self.steps)
         done = sum(1 for s in self.steps if s.status == StepStatus.SUCCEEDED)
+        running_count = len(self._plan_executions)
+        running_suffix = f"  |  {running_count} plan(s) running" if running_count else ""
         self.status_var.set(
             f"Plan: {self.current_plan.name}  |  "
             f"Path: {self.current_plan.project_root or '(not set)'}  |  "
-            f"Steps: {done}/{total} completed"
+            f"Steps: {done}/{total} completed{running_suffix}"
         )
 
     # ── Event Handlers ───────────────────────────────────────────
@@ -347,15 +371,27 @@ class OrchestratorApp:
         self.current_plan = self._plans[sel[0]]
         self.path_var.set(self.current_plan.project_root)
         self._load_steps()
-        self._set_output_text("No result yet")
+        self._sync_run_buttons()
+        # Show buffered output if this plan is running, else reset
+        exec_ctx = self._plan_executions.get(self.current_plan.id)
+        if exec_ctx:
+            self._set_output_text("".join(exec_ctx["output_lines"]))
+        else:
+            self._set_output_text("No result yet")
         self._update_status_bar()
 
     def _on_step_selected(self, event):
         sel = self.step_tree.selection()
         if not sel:
             return
-        step = next((s for s in self.steps if s.id == sel[0]), None)
+        # Always fetch the latest result from the database
+        step = self.db.get_step(sel[0])
         if step:
+            # Update the in-memory list as well
+            for i, s in enumerate(self.steps):
+                if s.id == step.id:
+                    self.steps[i] = step
+                    break
             self._set_output_text(step.result or "No result yet")
 
     # ── Plan Actions ─────────────────────────────────────────────
@@ -366,6 +402,9 @@ class OrchestratorApp:
     def _delete_plan(self):
         if not self.current_plan:
             messagebox.showwarning("Delete Plan", "No plan selected.")
+            return
+        if self._is_plan_running():
+            messagebox.showwarning("Delete Plan", "Cannot delete a running plan. Stop it first.")
             return
         if not messagebox.askyesno("Delete Plan", f"Delete '{self.current_plan.name}'?"):
             return
@@ -387,23 +426,19 @@ class OrchestratorApp:
             return
         try:
             with open(file_path, "r") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            messagebox.showerror("Import Error", f"Failed to read JSON file:\n{e}")
+                raw_text = f.read()
+        except OSError as e:
+            messagebox.showerror("Import Error", f"Failed to read file:\n{e}")
             return
 
-        # Support both array-of-steps and object with "steps" key
-        if isinstance(data, list):
-            steps_data = data
-        elif isinstance(data, dict) and "steps" in data:
-            steps_data = data["steps"]
-        else:
-            messagebox.showerror("Import Error", "Invalid JSON format. Expected an array of steps or an object with a 'steps' key.")
+        try:
+            steps_data, warnings = extract_json_steps(raw_text)
+        except ValueError as e:
+            messagebox.showerror("Import Error", str(e))
             return
 
-        if not steps_data:
-            messagebox.showwarning("Import", "No steps found in the JSON file.")
-            return
+        if warnings:
+            messagebox.showinfo("Import", "Parsed with fixups:\n" + "\n".join(warnings))
 
         ImportPreviewDialog(self.root, self.db, steps_data, on_saved=self._load_plans)
 
@@ -516,96 +551,160 @@ class OrchestratorApp:
         if not self.current_plan.project_root:
             messagebox.showwarning("Run Queue", "Set a project path first.")
             return
+        if self._is_plan_running():
+            messagebox.showwarning("Run Queue", "This plan is already running.")
+            return
         pending = [s for s in self.steps if s.status in (StepStatus.PENDING, StepStatus.QUEUED)]
         if not pending:
             messagebox.showinfo("Run Queue", "No pending steps to run.")
             return
 
-        self._running = True
-        self._cancel_event.clear()
-        self.run_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
-        self._set_output_text("")
-
         plan_id = self.current_plan.id
+        cancel_event = threading.Event()
+        ui_q = queue.Queue()
+        self._plan_executions[plan_id] = {
+            "cancel_event": cancel_event,
+            "ui_queue": ui_q,
+            "output_lines": [],
+        }
+
+        self._sync_run_buttons()
+        self._set_output_text("")
+        self._update_plan_list_labels()
+
         self.orchestrator.include_context = self.include_context_var.get()
+
+        def _on_step_started(step, step_num, total):
+            ui_q.put(("step_started", (plan_id, step, step_num, total)))
+
+        def _on_step_completed(step):
+            ui_q.put(("step_completed", (plan_id, step)))
+
+        def _on_step_failed(step, error):
+            ui_q.put(("step_failed", (plan_id, step, error)))
+
+        def _on_output(text):
+            ui_q.put(("output", (plan_id, text)))
 
         def _worker():
             try:
                 self.orchestrator.execute_queue(
                     plan_id,
-                    on_step_started=self._on_step_started,
-                    on_step_completed=self._on_step_completed,
-                    on_step_failed=self._on_step_failed,
-                    on_output=self._on_output,
-                    cancel_event=self._cancel_event,
+                    on_step_started=_on_step_started,
+                    on_step_completed=_on_step_completed,
+                    on_step_failed=_on_step_failed,
+                    on_output=_on_output,
+                    cancel_event=cancel_event,
                 )
             finally:
-                self._ui_queue.put(("done", None))
+                ui_q.put(("done", plan_id))
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
-        self._poll_ui_queue()
+        self._start_polling()
 
     def _stop_queue(self):
-        if self._running:
-            self._cancel_event.set()
-            self.status_var.set("Cancelling...")
+        if self.current_plan and self._is_plan_running():
+            self._plan_executions[self.current_plan.id]["cancel_event"].set()
+            self.status_var.set(f"Cancelling {self.current_plan.name}...")
 
-    # ── Execution Callbacks (called from worker thread) ──────────
+    # ── UI Queue Polling (handles all running plans) ───────────
 
-    def _on_step_started(self, step: PlanStep, step_num: int, total: int):
-        self._ui_queue.put(("step_started", (step, step_num, total)))
-
-    def _on_step_completed(self, step: PlanStep):
-        self._ui_queue.put(("step_completed", step))
-
-    def _on_step_failed(self, step: PlanStep, error: str):
-        self._ui_queue.put(("step_failed", (step, error)))
-
-    def _on_output(self, text: str):
-        self._ui_queue.put(("output", text))
-
-    # ── UI Queue Polling ─────────────────────────────────────────
+    def _start_polling(self):
+        if not self._polling:
+            self._polling = True
+            self._poll_ui_queue()
 
     def _poll_ui_queue(self):
-        try:
-            while True:
-                msg_type, data = self._ui_queue.get_nowait()
-                if msg_type == "output":
-                    self._append_output(data)
-                elif msg_type == "step_started":
-                    step, step_num, total = data
-                    self._update_step_row(step)
-                    self.status_var.set(f"Running step {step_num} of {total}: {step.title}")
-                elif msg_type == "step_completed":
-                    self._update_step_row(data)
-                elif msg_type == "step_failed":
-                    step, error = data
-                    self._update_step_row(step)
-                elif msg_type == "done":
-                    self._on_execution_done()
-                    return
-        except queue.Empty:
-            pass
-        if self._running:
+        current_plan_id = self.current_plan.id if self.current_plan else None
+        finished_plans: list[str] = []
+
+        for plan_id, ctx in list(self._plan_executions.items()):
+            try:
+                while True:
+                    msg_type, data = ctx["ui_queue"].get_nowait()
+                    is_visible = (plan_id == current_plan_id)
+
+                    if msg_type == "output":
+                        _, text = data
+                        ctx["output_lines"].append(text)
+                        if is_visible:
+                            self._append_output(text)
+
+                    elif msg_type == "step_started":
+                        _, step, step_num, total = data
+                        if is_visible:
+                            self._update_step_row(step)
+                            self.status_var.set(
+                                f"Running step {step_num} of {total}: {step.title}"
+                            )
+
+                    elif msg_type == "step_completed":
+                        _, step = data
+                        if is_visible:
+                            self._update_step_row(step)
+
+                    elif msg_type == "step_failed":
+                        _, step, error = data
+                        if is_visible:
+                            self._update_step_row(step)
+
+                    elif msg_type == "done":
+                        finished_plans.append(data)  # data is plan_id
+
+            except queue.Empty:
+                pass
+
+        for plan_id in finished_plans:
+            self._on_execution_done(plan_id)
+
+        if self._plan_executions:
             self.root.after(100, self._poll_ui_queue)
+        else:
+            self._polling = False
 
-    def _on_execution_done(self):
-        self._running = False
-        self.run_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self._load_steps()
-        self._update_status_bar()
+    def _on_execution_done(self, plan_id: str):
+        self._plan_executions.pop(plan_id, None)
+        self._update_plan_list_labels()
 
-        # Summary
-        succeeded = sum(1 for s in self.steps if s.status == StepStatus.SUCCEEDED)
-        failed = sum(1 for s in self.steps if s.status == StepStatus.FAILED)
-        total = len(self.steps)
-        messagebox.showinfo(
-            "Execution Complete",
-            f"Finished: {succeeded} succeeded, {failed} failed, {total} total steps.",
-        )
+        is_visible = self.current_plan and self.current_plan.id == plan_id
+        if is_visible:
+            self._sync_run_buttons()
+            self._load_steps()
+            self._update_status_bar()
+
+            steps = self.db.get_steps_for_plan(plan_id)
+            succeeded = sum(1 for s in steps if s.status == StepStatus.SUCCEEDED)
+            failed = sum(1 for s in steps if s.status == StepStatus.FAILED)
+            total = len(steps)
+            messagebox.showinfo(
+                "Execution Complete",
+                f"Plan '{self.current_plan.name}' finished:\n"
+                f"{succeeded} succeeded, {failed} failed, {total} total steps.",
+            )
+        else:
+            # Show a non-blocking notification for background plan
+            plan = self.db.get_plan(plan_id)
+            plan_name = plan.name if plan else plan_id
+            self._update_status_bar()
+            messagebox.showinfo(
+                "Execution Complete",
+                f"Background plan '{plan_name}' has finished.",
+            )
+
+    def _update_plan_list_labels(self):
+        """Refresh the plan list labels to show/hide running indicators."""
+        cur_sel = self.plan_listbox.curselection()
+        cur_idx = cur_sel[0] if cur_sel else None
+
+        self.plan_listbox.delete(0, tk.END)
+        for p in self._plans:
+            created = p.created_at[:10] if p.created_at else ""
+            running = "  [RUNNING]" if p.id in self._plan_executions else ""
+            self.plan_listbox.insert(tk.END, f"{p.name}  ({created}){running}")
+
+        if cur_idx is not None and cur_idx < len(self._plans):
+            self.plan_listbox.selection_set(cur_idx)
 
     def _update_step_row(self, step: PlanStep):
         """Update a single row in the Treeview to reflect the step's current status."""
@@ -628,6 +727,10 @@ class OrchestratorApp:
 
     def _apply_step_filter(self):
         """Rebuild the Treeview showing only steps matching filter + search."""
+        # Remember current selection
+        sel = self.step_tree.selection()
+        selected_id = sel[0] if sel else None
+
         for item in self.step_tree.get_children():
             self.step_tree.delete(item)
         status_filter = self.filter_var.get().lower()
@@ -642,11 +745,28 @@ class OrchestratorApp:
                 s.queue_position + 1, s.name, s.title, s.status.value, prompt_preview,
             ), tags=(s.status.value,))
 
+        # Restore selection if it's still visible after filtering
+        if selected_id and self.step_tree.exists(selected_id):
+            self.step_tree.selection_set(selected_id)
+            self.step_tree.focus(selected_id)
+
     def _refresh_steps(self):
-        """Reload steps from DB and re-apply filter."""
+        """Reload steps from DB, re-apply filter, restore selection, and show latest result."""
+        # Remember the currently selected step
+        sel = self.step_tree.selection()
+        selected_id = sel[0] if sel else None
+
         self._load_steps()
         self._apply_step_filter()
         self._update_status_bar()
+
+        # Restore selection and show latest result
+        if selected_id and self.step_tree.exists(selected_id):
+            self.step_tree.selection_set(selected_id)
+            self.step_tree.focus(selected_id)
+            step = next((s for s in self.steps if s.id == selected_id), None)
+            if step:
+                self._set_output_text(step.result or "No result yet")
 
     # ── Context Menu ─────────────────────────────────────────────
 
@@ -712,35 +832,54 @@ class OrchestratorApp:
         if not self.current_plan or not self.current_plan.project_root:
             messagebox.showwarning("Run Step", "Set a project path first.")
             return
-        if self._running:
-            messagebox.showwarning("Run Step", "An execution is already running.")
+        if self._is_plan_running():
+            messagebox.showwarning("Run Step", "This plan is already running.")
             return
 
-        self._running = True
-        self._cancel_event.clear()
-        self.run_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
+        plan_id = self.current_plan.id
+        cancel_event = threading.Event()
+        ui_q = queue.Queue()
+        self._plan_executions[plan_id] = {
+            "cancel_event": cancel_event,
+            "ui_queue": ui_q,
+            "output_lines": [],
+        }
+
+        self._sync_run_buttons()
         self._set_output_text("")
+        self._update_plan_list_labels()
 
         step_id = step.id
         self.orchestrator.include_context = self.include_context_var.get()
+
+        def _on_step_started(s, step_num, total):
+            ui_q.put(("step_started", (plan_id, s, step_num, total)))
+
+        def _on_step_completed(s):
+            ui_q.put(("step_completed", (plan_id, s)))
+
+        def _on_step_failed(s, error):
+            ui_q.put(("step_failed", (plan_id, s, error)))
+
+        def _on_output(text):
+            ui_q.put(("output", (plan_id, text)))
 
         def _worker():
             try:
                 self.orchestrator.execute_single_step(
                     step_id,
-                    on_step_started=self._on_step_started,
-                    on_step_completed=self._on_step_completed,
-                    on_step_failed=self._on_step_failed,
-                    on_output=self._on_output,
-                    cancel_event=self._cancel_event,
+                    on_step_started=_on_step_started,
+                    on_step_completed=_on_step_completed,
+                    on_step_failed=_on_step_failed,
+                    on_output=_on_output,
+                    cancel_event=cancel_event,
                 )
             finally:
-                self._ui_queue.put(("done", None))
+                ui_q.put(("done", plan_id))
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
-        self._poll_ui_queue()
+        self._start_polling()
 
     # ── Result Search ────────────────────────────────────────────
 

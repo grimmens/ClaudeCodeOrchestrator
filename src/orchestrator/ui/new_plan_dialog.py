@@ -1,4 +1,3 @@
-import json
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -7,6 +6,7 @@ from ..config import load_config
 from ..database import Database
 from ..models import Plan, PlanStep
 from ..services.claude_runner import run_claude
+from ..services.json_parser import extract_json_steps
 
 
 class NewPlanDialog(tk.Toplevel):
@@ -128,12 +128,13 @@ class NewPlanDialog(tk.Toplevel):
             return
 
         try:
-            steps = json.loads(stdout.strip())
-            if not isinstance(steps, list):
-                raise ValueError("Expected a JSON array")
-        except (json.JSONDecodeError, ValueError) as e:
-            messagebox.showerror("Parse Error", f"Failed to parse Claude's response:\n{e}\n\nRaw output:\n{stdout[:500]}", parent=self)
+            steps, warnings = extract_json_steps(stdout)
+        except ValueError as e:
+            messagebox.showerror("Parse Error", str(e), parent=self)
             return
+
+        if warnings:
+            self.progress_var.set("Parsed with fixups: " + "; ".join(warnings))
 
         self._preview_steps = steps
         self._refresh_tree()
