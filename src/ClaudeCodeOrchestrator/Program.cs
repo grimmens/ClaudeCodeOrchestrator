@@ -13,6 +13,46 @@ var configuration = new ConfigurationBuilder()
 var connectionString = configuration.GetConnectionString("Default")!;
 var orchestratorConfig = configuration.GetSection("Orchestrator");
 
+// ── Short-circuit flags ────────────────────────────────────────────────────
+var lowerArgs = args.Select(a => a.ToLower()).ToArray();
+if (lowerArgs.Contains("--help") || lowerArgs.Contains("-h"))
+{
+    var helpText =
+        "[bold underline]ClaudeCodeOrchestrator[/] — AI-powered build orchestrator\n\n" +
+        "[bold]FLAGS[/]\n" +
+        "  [cyan]--plan, -p[/]  <file>   Plan JSON file [dim](default: todos.json)[/]\n" +
+        "  [cyan]--phase[/]     <n>      Phase number to execute [dim](default: 1)[/]\n" +
+        "  [cyan]--step, -s[/]  <n>      Step number to start at [dim](default: 1)[/]\n" +
+        "  [cyan]--budget, -b[/] <n>     Max budget in USD per step\n" +
+        "  [cyan]--dry-run[/]            Preview steps without executing agents\n" +
+        "  [cyan]--reload[/]             Force-reload the plan from the JSON file\n" +
+        "  [cyan]--list[/]               List all plan steps and exit\n" +
+        "  [cyan]--progress[/]           Show progress summary and exit\n" +
+        "  [cyan]--help, -h[/]           Show this help message and exit\n" +
+        "  [cyan]--version, -v[/]        Show version and exit\n\n" +
+        "[bold]EXAMPLES[/]\n" +
+        "  dotnet run -- --plan todos.json --phase 1\n" +
+        "  dotnet run -- --phase 1 --step 3\n" +
+        "  dotnet run -- --list\n" +
+        "  dotnet run -- --progress\n" +
+        "  dotnet run -- --dry-run --phase 1\n" +
+        "  dotnet run -- --reload --phase 1";
+
+    AnsiConsole.Write(new Panel(helpText)
+    {
+        Border = BoxBorder.Rounded,
+        Header = new PanelHeader("[bold blue] Usage [/]"),
+        Padding = new Padding(2, 1)
+    });
+    return 0;
+}
+
+if (lowerArgs.Contains("--version") || lowerArgs.Contains("-v"))
+{
+    AnsiConsole.MarkupLine("ClaudeCodeOrchestrator [bold]v0.1.0[/]");
+    return 0;
+}
+
 // ── Parse CLI args ──────────────────────────────────────────────────────────
 string planFile = "todos.json";
 int phase = 1;
