@@ -11,7 +11,7 @@ namespace ClaudeCodeOrchestrator.Services;
 public class Orchestrator
 {
     private readonly OrchestratorDbContext _db;
-    private readonly AgentRunner _agentRunner;
+    private readonly IAgentRunner _agentRunner;
     private readonly BuildChecker _buildChecker;
     private readonly string _projectRoot;
     private readonly string _logDir;
@@ -25,7 +25,7 @@ public class Orchestrator
 
     public Orchestrator(
         OrchestratorDbContext db,
-        AgentRunner agentRunner,
+        IAgentRunner agentRunner,
         BuildChecker buildChecker,
         string projectRoot,
         string logDir)

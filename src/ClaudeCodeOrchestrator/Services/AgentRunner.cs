@@ -8,7 +8,7 @@ namespace ClaudeCodeOrchestrator.Services;
 /// <summary>
 /// Spawns a claude CLI subprocess for a given PlanStep and streams output.
 /// </summary>
-public class AgentRunner
+public class AgentRunner : IAgentRunner
 {
     private readonly OrchestratorDbContext _db;
     private readonly string _logDir;
