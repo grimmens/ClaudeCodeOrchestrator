@@ -1,1 +1,4 @@
 # No external dependencies - uses Python standard library only
+
+# Optional: drag-and-drop support for importing JSON files
+# tkinterdnd2

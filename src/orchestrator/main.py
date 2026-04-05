@@ -1,3 +1,4 @@
+import json
 import queue
 import threading
 import tkinter as tk
@@ -9,6 +10,7 @@ from .database import Database
 from .models import Plan, PlanStep, StepStatus
 from .config import save_config
 from .services.orchestrator import Orchestrator
+from .ui.import_preview_dialog import ImportPreviewDialog
 from .ui.new_plan_dialog import NewPlanDialog
 from .ui.settings_dialog import SettingsDialog
 from .ui.step_editor_dialog import StepEditorDialog
@@ -35,6 +37,7 @@ class OrchestratorApp:
         self._build_menu()
         self._build_ui()
         self._load_plans()
+        self._setup_drag_and_drop()
 
     # ── Menu Bar ─────────────────────────────────────────────────
 
@@ -61,6 +64,24 @@ class OrchestratorApp:
         help_menu.add_command(label="About", command=self._show_about)
         menubar.add_cascade(label="Help", menu=help_menu)
 
+    # ── Drag and Drop ────────────────────────────────────────────
+
+    def _setup_drag_and_drop(self):
+        try:
+            from tkinterdnd2 import DND_FILES
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind("<<Drop>>", self._on_drop)
+        except (ImportError, Exception):
+            pass  # tkinterdnd2 not available, skip drag-and-drop
+
+    def _on_drop(self, event):
+        file_path = event.data.strip()
+        # tkinterdnd2 may wrap paths in braces on Windows
+        if file_path.startswith("{") and file_path.endswith("}"):
+            file_path = file_path[1:-1]
+        if file_path.lower().endswith(".json"):
+            self._import_json(file_path)
+
     # ── Menu Actions ─────────────────────────────────────────────
 
     def _open_settings(self):
@@ -85,7 +106,6 @@ class OrchestratorApp:
         data = {
             "name": self.current_plan.name,
             "project_root": self.current_plan.project_root,
-            "description": self.current_plan.description,
             "steps": [
                 {
                     "name": s.name,
@@ -353,9 +373,35 @@ class OrchestratorApp:
         self._set_output_text("")
         self._update_status_bar()
 
-    def _import_json(self):
-        # Placeholder – will be implemented later
-        messagebox.showinfo("Import JSON", "JSON import not yet implemented.")
+    def _import_json(self, file_path: str | None = None):
+        if not file_path:
+            file_path = filedialog.askopenfilename(
+                title="Import Plan from JSON",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            messagebox.showerror("Import Error", f"Failed to read JSON file:\n{e}")
+            return
+
+        # Support both array-of-steps and object with "steps" key
+        if isinstance(data, list):
+            steps_data = data
+        elif isinstance(data, dict) and "steps" in data:
+            steps_data = data["steps"]
+        else:
+            messagebox.showerror("Import Error", "Invalid JSON format. Expected an array of steps or an object with a 'steps' key.")
+            return
+
+        if not steps_data:
+            messagebox.showwarning("Import", "No steps found in the JSON file.")
+            return
+
+        ImportPreviewDialog(self.root, self.db, steps_data, on_saved=self._load_plans)
 
     def _set_project_path(self):
         if not self.current_plan:
@@ -728,7 +774,11 @@ class OrchestratorApp:
 
 
 def main():
-    root = tk.Tk()
+    try:
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+    except (ImportError, Exception):
+        root = tk.Tk()
     OrchestratorApp(root)
     root.mainloop()
 
