@@ -63,57 +63,6 @@ var buildChecker = new BuildChecker(buildCommand);
 var agentRunner = new AgentRunner(db, logDir, maxBudget, maxTurns, allowedTools);
 var orchestrator = new Orchestrator(db, agentRunner, buildChecker, projectRoot, logDir);
 
-// ── Console output hooks ────────────────────────────────────────────────────
-agentRunner.OnOutput += (run, line) =>
-{
-    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(line)}[/]");
-};
-
-agentRunner.OnStatusChanged += (run, status) =>
-{
-    var name = Markup.Escape(run.PlanStep?.Name ?? run.PlanStepId.ToString());
-    AnsiConsole.MarkupLine($"[dim]Agent {name} Status: {status}[/]");
-};
-
-orchestrator.OnStepStarted += (planStep, run) =>
-{
-    var title = Markup.Escape(planStep.Title);
-    var total = plan.Steps.Count(s => s.Phase == planStep.Phase);
-    AnsiConsole.MarkupLine($"[bold cyan]=== Phase {planStep.Phase} | Step {planStep.Step}/{total} | {title} ===[/]");
-};
-
-orchestrator.OnStepCompleted += (planStep, run) =>
-{
-    var name = Markup.Escape(planStep.Name);
-    AnsiConsole.MarkupLine($"[green]✓ Step {planStep.Step} ({name}) completed.[/]");
-};
-
-orchestrator.OnStepFailed += (planStep, run) =>
-{
-    var name = Markup.Escape(planStep.Name);
-    var error = Markup.Escape(run.ErrorMessage ?? "unknown error");
-    AnsiConsole.MarkupLine($"[bold red]✗ Step {planStep.Step} ({name}): {error}[/]");
-};
-
-orchestrator.OnBuildCheckStarted += (stepName) =>
-{
-    var name = Markup.Escape(stepName);
-    AnsiConsole.MarkupLine($"[yellow]BUILD: Checking build after {name}...[/]");
-};
-
-orchestrator.OnBuildCheckCompleted += (success, output) =>
-{
-    if (success)
-        AnsiConsole.MarkupLine("[green]BUILD: OK[/]");
-    else
-        AnsiConsole.MarkupLine($"[red]BUILD: FAILED[/]\n{Markup.Escape(output)}");
-};
-
-orchestrator.OnInfo += (msg) =>
-{
-    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(msg)}[/]");
-};
-
 // ── Execute ─────────────────────────────────────────────────────────────────
 var bannerPanel = new Panel(
     $"[bold]{Markup.Escape(plan.Name)}[/] ({plan.Steps.Count} steps total)\n" +
@@ -126,7 +75,60 @@ var bannerPanel = new Panel(
 AnsiConsole.Write(bannerPanel);
 AnsiConsole.WriteLine();
 
-var result = await orchestrator.ExecutePhaseAsync(plan, phase, step, dryRun);
+var result = await AnsiConsole.Status().StartAsync("Initializing...", async ctx =>
+{
+    ctx.Spinner(Spinner.Known.Dots);
+    ctx.SpinnerStyle(Style.Parse("cyan"));
+
+    agentRunner.OnOutput += (run, line) =>
+    {
+        var truncated = line.Length > 120 ? line[..120] + "..." : line;
+        ctx.Status(Markup.Escape(truncated));
+    };
+
+    agentRunner.OnStatusChanged += (run, status) =>
+    {
+        var name = run.PlanStep?.Name ?? run.PlanStepId.ToString();
+        ctx.Status($"Agent [bold]{Markup.Escape(name)}[/]: {status}");
+    };
+
+    orchestrator.OnStepStarted += (planStep, run) =>
+    {
+        var title = Markup.Escape(planStep.Title);
+        var total = plan.Steps.Count(s => s.Phase == planStep.Phase);
+        ctx.Status($"[bold cyan]Phase {planStep.Phase} | Step {planStep.Step}/{total} | {title}[/]");
+    };
+
+    orchestrator.OnStepCompleted += (planStep, run) =>
+    {
+        var name = Markup.Escape(planStep.Name);
+        ctx.Status($"[green]✓ Step {planStep.Step} ({name}) completed[/]");
+    };
+
+    orchestrator.OnStepFailed += (planStep, run) =>
+    {
+        var name = Markup.Escape(planStep.Name);
+        var error = Markup.Escape(run.ErrorMessage ?? "unknown error");
+        ctx.Status($"[bold red]✗ Step {planStep.Step} ({name}): {error}[/]");
+    };
+
+    orchestrator.OnBuildCheckStarted += (stepName) =>
+    {
+        ctx.Status($"[yellow]Checking build after {Markup.Escape(stepName)}...[/]");
+    };
+
+    orchestrator.OnBuildCheckCompleted += (success, output) =>
+    {
+        ctx.Status(success ? "[green]Build OK[/]" : "[red]Build FAILED[/]");
+    };
+
+    orchestrator.OnInfo += (msg) =>
+    {
+        ctx.Status($"[dim]{Markup.Escape(msg)}[/]");
+    };
+
+    return await orchestrator.ExecutePhaseAsync(plan, phase, step, dryRun);
+});
 
 AnsiConsole.WriteLine();
 if (result.Success)
