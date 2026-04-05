@@ -4,6 +4,8 @@ A Python application that orchestrates multi-step Claude Code agent executions w
 
 The orchestrator (`src/orchestrator/`) provides a tkinter GUI for creating plans, managing step queues, and executing Claude Code agents with context sharing between steps.
 
+![alt text](show.PNG "Program")
+
 ### Requirements
 
 - Python 3.10+
