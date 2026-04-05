@@ -12,6 +12,7 @@ DEFAULTS = {
     "claude_cli_path": "claude",
     "include_context": True,
     "include_history_context": True,
+    "enable_history_tool": True,
     "db_path": "orchestrator.db",
     "permission_mode": "override",
 }
@@ -25,6 +26,7 @@ class Config:
     claude_cli_path: str = "claude"
     include_context: bool = True
     include_history_context: bool = True
+    enable_history_tool: bool = True
     db_path: str = "orchestrator.db"
     permission_mode: str = "override"
 

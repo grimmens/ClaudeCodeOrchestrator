@@ -8,7 +8,7 @@ class SettingsDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, config: Config, on_saved=None):
         super().__init__(parent)
         self.title("Settings")
-        self.geometry("540x460")
+        self.geometry("540x490")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -101,6 +101,13 @@ class SettingsDialog(tk.Toplevel):
             row=row, column=0, columnspan=2, sticky=tk.W, **pad)
         row += 1
 
+        # Write History File for Agents
+        self.history_tool_var = tk.BooleanVar()
+        ttk.Checkbutton(frame, text="Write history file for agents",
+                        variable=self.history_tool_var).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, **pad)
+        row += 1
+
         # Database Path
         ttk.Label(frame, text="Database Path:").grid(row=row, column=0, sticky=tk.W, **pad)
         self.db_var = tk.StringVar()
@@ -120,6 +127,7 @@ class SettingsDialog(tk.Toplevel):
         self.cli_var.set(self.config.claude_cli_path)
         self.context_var.set(self.config.include_context)
         self.history_context_var.set(self.config.include_history_context)
+        self.history_tool_var.set(self.config.enable_history_tool)
         self.db_var.set(self.config.db_path)
         self.perm_mode_var.set(self.config.permission_mode)
 
@@ -146,6 +154,7 @@ class SettingsDialog(tk.Toplevel):
         self.config.claude_cli_path = self.cli_var.get()
         self.config.include_context = self.context_var.get()
         self.config.include_history_context = self.history_context_var.get()
+        self.config.enable_history_tool = self.history_tool_var.get()
         self.config.permission_mode = self.perm_mode_var.get()
 
         # Build allowed_tools string from checkboxes

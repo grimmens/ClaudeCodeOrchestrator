@@ -7,6 +7,12 @@ from ..database import Database
 from ..models import AgentRun, PlanStep, StepStatus
 from . import claude_runner
 from .context_builder import build_context, build_history_context
+from .history_tool import (
+    cleanup_claude_md_hint,
+    cleanup_history_file,
+    inject_claude_md_hint,
+    write_history_file,
+)
 
 
 # Appended to every step prompt so Claude auto-verifies the project
@@ -42,18 +48,26 @@ class Orchestrator:
         plan = self.db.get_plan(plan_id)
         working_dir = plan.project_root if plan else "."
 
-        for idx, step in enumerate(runnable):
-            if cancel_event.is_set():
-                on_output("\n--- Execution cancelled by user ---\n")
-                break
+        # Write history files for agent access
+        if self.config.enable_history_tool and runnable:
+            self._setup_history_tool(plan_id, working_dir)
 
-            self._execute_step(step, working_dir, idx + 1, total,
-                               on_step_started, on_step_completed, on_step_failed,
-                               on_output, cancel_event)
+        try:
+            for idx, step in enumerate(runnable):
+                if cancel_event.is_set():
+                    on_output("\n--- Execution cancelled by user ---\n")
+                    break
 
-        # Auto-snapshot after queue run completes
-        if not cancel_event.is_set() and runnable:
-            self._auto_snapshot(plan_id, runnable)
+                self._execute_step(step, working_dir, idx + 1, total,
+                                   on_step_started, on_step_completed, on_step_failed,
+                                   on_output, cancel_event)
+
+            # Auto-snapshot after queue run completes
+            if not cancel_event.is_set() and runnable:
+                self._auto_snapshot(plan_id, runnable)
+        finally:
+            if self.config.enable_history_tool and runnable:
+                self._cleanup_history_tool(working_dir)
 
     def execute_single_step(
         self,
@@ -71,9 +85,17 @@ class Orchestrator:
             return
         plan = self.db.get_plan(step.plan_id)
         working_dir = plan.project_root if plan else "."
-        self._execute_step(step, working_dir, 1, 1,
-                           on_step_started, on_step_completed, on_step_failed,
-                           on_output, cancel_event)
+
+        if self.config.enable_history_tool:
+            self._setup_history_tool(step.plan_id, working_dir)
+
+        try:
+            self._execute_step(step, working_dir, 1, 1,
+                               on_step_started, on_step_completed, on_step_failed,
+                               on_output, cancel_event)
+        finally:
+            if self.config.enable_history_tool:
+                self._cleanup_history_tool(working_dir)
 
     def _execute_step(
         self,
@@ -161,6 +183,16 @@ class Orchestrator:
             exit_code=exit_code,
         )
         self.db.create_agent_run(run)
+
+    def _setup_history_tool(self, plan_id: str, working_dir: str) -> None:
+        """Write history file and inject CLAUDE.md hint before execution."""
+        write_history_file(self.db, plan_id, working_dir)
+        inject_claude_md_hint(working_dir)
+
+    def _cleanup_history_tool(self, working_dir: str) -> None:
+        """Remove history file and CLAUDE.md hint after execution."""
+        cleanup_history_file(working_dir)
+        cleanup_claude_md_hint(working_dir)
 
     def _auto_snapshot(self, plan_id: str, executed_steps: list[PlanStep]) -> None:
         # Re-read steps to get final statuses
