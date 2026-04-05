@@ -23,11 +23,21 @@
 .PARAMETER IncludeContext
     Include results from previous steps in each prompt. Default: true
 
+.PARAMETER UseDb
+    When set, read/write step results and agent runs to the shared SQLite database.
+
+.PARAMETER DbPath
+    Path to the SQLite database file. Default: orchestrator.db
+
+.PARAMETER PlanId
+    The plan ID in the database to update. Required when -UseDb is set.
+
 .EXAMPLE
     .\claude-worker-agent.ps1
     .\claude-worker-agent.ps1 -PlanFile .\other-plan.json
     .\claude-worker-agent.ps1 -Step 3
     .\claude-worker-agent.ps1 -DryRun
+    .\claude-worker-agent.ps1 -UseDb -PlanId "abc-123" -DbPath orchestrator.db
 #>
 
 param(
@@ -35,12 +45,34 @@ param(
     [int]$Step = 1,
     [switch]$DryRun,
     [double]$MaxBudget = 5.00,
-    [bool]$IncludeContext = $true
+    [bool]$IncludeContext = $true,
+    [switch]$UseDb,
+    [string]$DbPath = "orchestrator.db",
+    [string]$PlanId = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
 $LogDir = Join-Path $ProjectRoot ".claude/logs"
+
+# -- Validate -UseDb parameters ------------------------------------------------
+if ($UseDb) {
+    if (-not $PlanId) {
+        Write-Host "-PlanId is required when -UseDb is set." -ForegroundColor Red
+        exit 1
+    }
+    $DbFullPath = if ([System.IO.Path]::IsPathRooted($DbPath)) { $DbPath } else { Join-Path $ProjectRoot $DbPath }
+    if (-not (Test-Path $DbFullPath)) {
+        Write-Host "Database file not found: $DbFullPath" -ForegroundColor Red
+        exit 1
+    }
+    # Check for sqlite3 CLI
+    $script:Sqlite3Available = $null -ne (Get-Command "sqlite3" -ErrorAction SilentlyContinue)
+    if (-not $script:Sqlite3Available) {
+        Write-Host "WARNING: sqlite3 not found on PATH. Falling back to file-based logging only." -ForegroundColor Yellow
+        $UseDb = $false
+    }
+}
 
 # -- Load plan from JSON -------------------------------------------------------
 $PlanPath = if ([System.IO.Path]::IsPathRooted($PlanFile)) { $PlanFile } else { Join-Path $ProjectRoot $PlanFile }
@@ -54,6 +86,78 @@ if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Forc
 
 # -- Results tracker (for context sharing) -------------------------------------
 $StepResults = @{}
+
+# -- SQLite DB step lookup (maps queue_position to step id) --------------------
+$script:DbStepMap = @{}
+if ($UseDb) {
+    $query = "SELECT id, queue_position FROM plan_steps WHERE plan_id = '$PlanId' ORDER BY queue_position;"
+    $rows = & sqlite3 -separator "|" $DbFullPath $query 2>&1
+    foreach ($row in $rows) {
+        if ($row -match '^(.+)\|(\d+)$') {
+            $script:DbStepMap[[int]$Matches[2]] = $Matches[1]
+        }
+    }
+    if ($script:DbStepMap.Count -eq 0) {
+        Write-Host "WARNING: No steps found in DB for plan $PlanId. DB updates will be skipped." -ForegroundColor Yellow
+        $UseDb = $false
+    } else {
+        Write-Host "Loaded $($script:DbStepMap.Count) step(s) from DB for plan $PlanId." -ForegroundColor DarkGray
+    }
+}
+
+# -- SQLite helper functions ----------------------------------------------------
+
+function Invoke-Sqlite {
+    param([string]$Sql)
+    if (-not $UseDb) { return }
+    try {
+        $result = $Sql | & sqlite3 $DbFullPath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "WARNING: sqlite3 error: $result" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "WARNING: sqlite3 failed: $_" -ForegroundColor Yellow
+    }
+}
+
+function Update-StepInDb {
+    param(
+        [string]$StepId,
+        [string]$Status,
+        [string]$Result
+    )
+    # Escape single quotes for SQL
+    $safeResult = $Result -replace "'", "''"
+    $sql = @"
+UPDATE plan_steps SET status = '$Status', result = '$safeResult' WHERE id = '$StepId';
+"@
+    Invoke-Sqlite -Sql $sql
+}
+
+function New-AgentRunInDb {
+    param(
+        [string]$StepId,
+        [string]$Status,
+        [string]$StartedAt,
+        [string]$FinishedAt,
+        [string]$Output,
+        [string]$ErrorMessage,
+        [int]$ExitCode
+    )
+    $runId = [guid]::NewGuid().ToString()
+    # Get the next attempt number for this step
+    $attemptQuery = "SELECT COALESCE(MAX(attempt_number), 0) FROM agent_runs WHERE step_id = '$StepId';"
+    $maxAttempt = & sqlite3 $DbFullPath $attemptQuery 2>&1
+    $attemptNum = if ($maxAttempt -match '^\d+$') { [int]$maxAttempt + 1 } else { 1 }
+
+    $safeOutput = $Output -replace "'", "''"
+    $safeError = $ErrorMessage -replace "'", "''"
+    $sql = @"
+INSERT INTO agent_runs (id, step_id, attempt_number, status, started_at, finished_at, output, error_message, exit_code, cost_usd)
+VALUES ('$runId', '$StepId', $attemptNum, '$Status', '$StartedAt', '$FinishedAt', '$safeOutput', '$safeError', $ExitCode, NULL);
+"@
+    Invoke-Sqlite -Sql $sql
+}
 
 # -- Helper functions ----------------------------------------------------------
 
@@ -231,6 +335,7 @@ Write-Host "====================================================================
 Write-Host ""
 Write-Host "Plan:   $PlanPath" -ForegroundColor DarkGray
 Write-Host "$totalSteps steps | Starting at step $Step | Budget: `$$MaxBudget/step" -ForegroundColor White
+if ($UseDb) { Write-Host "DB:     $DbFullPath (Plan: $PlanId)" -ForegroundColor DarkGray }
 if ($DryRun) { Write-Host "[DRY RUN MODE]" -ForegroundColor Yellow }
 Write-Host ""
 
@@ -250,7 +355,16 @@ for ($i = ($Step - 1); $i -lt $totalSteps; $i++) {
         "TASK:`n$($current.prompt)"
     }
 
+    # Record start time and mark running in DB
+    $stepStartedAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss")
+    $dbStepId = if ($UseDb -and $script:DbStepMap.ContainsKey($i)) { $script:DbStepMap[$i] } else { $null }
+    if ($dbStepId) {
+        Update-StepInDb -StepId $dbStepId -Status "running" -Result ""
+    }
+
     $result = Invoke-Claude -Prompt $taskPrompt -StepName "step${stepNum}_$($current.name)"
+
+    $stepFinishedAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss")
 
     # Store result for context sharing
     $StepResults[$stepNum] = @{
@@ -260,6 +374,11 @@ for ($i = ($Step - 1); $i -lt $totalSteps; $i++) {
     }
 
     if (-not $result.Success -and -not $DryRun) {
+        # Update DB with failure
+        if ($dbStepId) {
+            Update-StepInDb -StepId $dbStepId -Status "failed" -Result $result.Output
+            New-AgentRunInDb -StepId $dbStepId -Status "failed" -StartedAt $stepStartedAt -FinishedAt $stepFinishedAt -Output $result.Output -ErrorMessage "Claude exited with non-zero exit code" -ExitCode 1
+        }
         Write-Host ""
         Write-Host "Step $stepNum failed. Aborting." -ForegroundColor Red
         Write-Host "To resume: .\claude-worker-agent.ps1 -Step $stepNum" -ForegroundColor Yellow
@@ -275,11 +394,21 @@ for ($i = ($Step - 1); $i -lt $totalSteps; $i++) {
             $fixResult = Invoke-Claude -Prompt "The build failed. Run 'dotnet build', read the errors, and fix all compile errors. Commit the fix." -StepName "step${stepNum}_fix"
 
             if (-not $fixResult.Success -or -not (Confirm-BuildSuccess)) {
+                if ($dbStepId) {
+                    Update-StepInDb -StepId $dbStepId -Status "failed" -Result $result.Output
+                    New-AgentRunInDb -StepId $dbStepId -Status "failed" -StartedAt $stepStartedAt -FinishedAt (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss") -Output $result.Output -ErrorMessage "Build failed and auto-fix failed" -ExitCode 1
+                }
                 Write-Host "Auto-fix failed. Aborting." -ForegroundColor Red
                 Write-Host "To resume: .\claude-worker-agent.ps1 -Step $stepNum" -ForegroundColor Yellow
                 exit 1
             }
         }
+    }
+
+    # Update DB with success
+    if ($dbStepId -and -not $DryRun) {
+        Update-StepInDb -StepId $dbStepId -Status "succeeded" -Result $result.Output
+        New-AgentRunInDb -StepId $dbStepId -Status "succeeded" -StartedAt $stepStartedAt -FinishedAt $stepFinishedAt -Output $result.Output -ErrorMessage "" -ExitCode 0
     }
 
     Write-Host "Step $stepNum/$totalSteps completed." -ForegroundColor Green
