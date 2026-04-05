@@ -113,8 +113,9 @@ public class AgentRunner
         var psi = new ProcessStartInfo
         {
             FileName = "claude",
-            Arguments = $"-p \"{EscapeForShell(prompt)}\" --allowedTools {_allowedTools} --max-turns {_maxTurns} --max-budget-usd {_maxBudget}",
+            Arguments = $"-p - --allowedTools {_allowedTools} --max-turns {_maxTurns} --max-budget-usd {_maxBudget}",
             WorkingDirectory = workingDir,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -145,6 +146,10 @@ public class AgentRunner
         process.Start();
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
+
+        // Write prompt to stdin and close it so claude reads it
+        await process.StandardInput.WriteAsync(prompt);
+        process.StandardInput.Close();
 
         await process.WaitForExitAsync(ct);
 
@@ -195,10 +200,5 @@ public class AgentRunner
         {
             // Non-critical — don't fail the run over git diff issues
         }
-    }
-
-    private static string EscapeForShell(string input)
-    {
-        return input.Replace("\"", "\\\"").Replace("\r\n", " ").Replace("\n", " ");
     }
 }
