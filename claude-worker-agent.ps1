@@ -1,67 +1,93 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    SpeiseDirekt Claude Worker Agent - Orchestriert Claude Code fuer phasenweise Entwicklung.
+    ClaudeCodeOrchestrator Worker Agent - Executes plan steps sequentially.
 
 .DESCRIPTION
-    Fuehrt die Roadmap-Phasen aus .claude/plans/wild-greeting-boot.md Schritt fuer Schritt aus.
-    Jeder Schritt wird von einer eigenen Claude-Session abgearbeitet und committet.
+    Reads steps from a JSON plan file and executes them one by one using Claude Code.
+    Each step is run in its own Claude session, build-checked, and committed.
+    All output is streamed to the console and logged to files.
 
 .PARAMETER PlanFile
-    Pfad zur JSON-Datei mit den Instruktionen/Todos. Default: todos.json
-
-.PARAMETER Phase
-    Welche Phase ausgefuehrt werden soll (1, 2, 3, ...). Default: 1
+    Path to the JSON file with the steps. Default: todos.json
 
 .PARAMETER Step
-    Ab welchem Schritt innerhalb der Phase gestartet wird (1, 2, 3, ...). Default: 1
+    Start execution from this step number (1-based). Default: 1
 
 .PARAMETER DryRun
-    Zeigt die Prompts an ohne sie auszufuehren.
+    Show prompts without executing them.
 
 .PARAMETER MaxBudget
-    Max USD Budget pro Schritt. Default: 5.00
+    Max USD budget per step. Default: 5.00
+
+.PARAMETER IncludeContext
+    Include results from previous steps in each prompt. Default: true
 
 .EXAMPLE
-    .\claude-worker-agent.ps1 -Phase 1
-    .\claude-worker-agent.ps1 -PlanFile .\other-plan.json -Phase 2
-    .\claude-worker-agent.ps1 -Phase 1 -Step 2
-    .\claude-worker-agent.ps1 -Phase 1 -DryRun
+    .\claude-worker-agent.ps1
+    .\claude-worker-agent.ps1 -PlanFile .\other-plan.json
+    .\claude-worker-agent.ps1 -Step 3
+    .\claude-worker-agent.ps1 -DryRun
 #>
 
 param(
     [string]$PlanFile = "todos.json",
-    [int]$Phase = 1,
     [int]$Step = 1,
     [switch]$DryRun,
-    [double]$MaxBudget = 5.00
+    [double]$MaxBudget = 5.00,
+    [bool]$IncludeContext = $true
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
-$RoadmapFile = ".claude/plans/wild-greeting-boot.md"
 $LogDir = Join-Path $ProjectRoot ".claude/logs"
 
-# ── Plan aus JSON laden ─────────────────────────────────────────────────────
+# -- Load plan from JSON -------------------------------------------------------
 $PlanPath = if ([System.IO.Path]::IsPathRooted($PlanFile)) { $PlanFile } else { Join-Path $ProjectRoot $PlanFile }
 if (-not (Test-Path $PlanPath)) {
-    Write-Host "Plan-Datei nicht gefunden: $PlanPath" -ForegroundColor Red
+    Write-Host "Plan file not found: $PlanPath" -ForegroundColor Red
     exit 1
 }
-$AllTodos = Get-Content $PlanPath -Raw | ConvertFrom-Json
+$AllSteps = Get-Content $PlanPath -Raw | ConvertFrom-Json
 
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 
-# ── Hilfsfunktionen ──────────────────────────────────────────────────────────
+# -- Results tracker (for context sharing) -------------------------------------
+$StepResults = @{}
+
+# -- Helper functions ----------------------------------------------------------
 
 function Write-StepHeader {
-    param([string]$PhaseNum, [string]$StepNum, [string]$Title)
+    param([int]$StepNum, [int]$Total, [string]$Title)
     $separator = "=" * 70
     Write-Host ""
     Write-Host $separator -ForegroundColor Cyan
-    Write-Host "  Phase $PhaseNum | Schritt $StepNum | $Title" -ForegroundColor Cyan
+    Write-Host "  Step $StepNum/$Total | $Title" -ForegroundColor Cyan
     Write-Host $separator -ForegroundColor Cyan
     Write-Host ""
+}
+
+function Build-ContextSection {
+    param([int]$CurrentStep)
+
+    if (-not $IncludeContext -or $StepResults.Count -eq 0) { return "" }
+
+    $contextLines = @("CONTEXT FROM PREVIOUS STEPS:")
+    foreach ($key in ($StepResults.Keys | Sort-Object)) {
+        if ($key -ge $CurrentStep) { continue }
+        $prev = $StepResults[$key]
+        $result = $prev.Result
+        # Truncate long results
+        if ($result.Length -gt 500) {
+            $result = $result.Substring(0, 500) + "... [truncated]"
+        }
+        $contextLines += "---"
+        $contextLines += "Step $key ($($prev.Name)): $($prev.Title)"
+        $contextLines += "Result: $result"
+    }
+    $contextLines += "---"
+    $contextLines += ""
+    return ($contextLines -join "`n")
 }
 
 function Invoke-Claude {
@@ -74,145 +100,193 @@ function Invoke-Claude {
     $logFile = Join-Path $LogDir "${timestamp}_${StepName}.log"
 
     if ($DryRun) {
-        Write-Host "[DRY RUN] Wuerde ausfuehren:" -ForegroundColor Yellow
+        Write-Host "[DRY RUN] Would execute:" -ForegroundColor Yellow
         Write-Host $Prompt -ForegroundColor Gray
         Write-Host ""
-        return $true
+        return @{ Success = $true; Output = "[DRY RUN]" }
     }
 
-    Write-Host "Starte Claude-Session..." -ForegroundColor Green
-    Write-Host "Log: $logFile" -ForegroundColor DarkGray
-
     $fullPrompt = @"
-KONTEXT: Du arbeitest am SpeiseDirekt3-Projekt. Die Roadmap liegt in $RoadmapFile.
-Die shared Class Library 'SpeiseDirekt.Model' existiert bereits mit Models, DbContext, Services.
-Das Blazor-Web-Projekt ist 'SpeiseDirekt3'. Branch: feature/extract-class-library.
+IMPORTANT:
+- Work ONLY on the step described below, nothing more.
+- Make sure 'dotnet build' passes when you are done.
+- Commit your changes with a descriptive commit message.
+- If you encounter problems, fix them independently.
 
-WICHTIG:
-- Lies zuerst den Plan in $RoadmapFile um den Gesamtkontext zu verstehen.
-- Arbeite NUR den unten beschriebenen Schritt ab, nicht mehr.
-- Stelle sicher dass 'dotnet build' am Ende ohne Fehler durchlaeuft.
-- Committe deine Aenderungen mit einer aussagekraeftigen Commit-Message.
-- Wenn du auf Probleme stoesst, behebe sie selbststaendig.
-
-AUFGABE:
 $Prompt
 "@
 
-    try {
-        $output = claude -p $fullPrompt --allowedTools "Read" "Write" "Edit" "Bash" "Glob" "Grep" --max-turns 50 --max-budget-usd $MaxBudget 2>&1
-        $output | Out-File -FilePath $logFile -Encoding utf8
-        $exitCode = $LASTEXITCODE
+    $promptFile = Join-Path $env:TEMP "claude-prompt-${timestamp}-${StepName}.md"
+    [System.IO.File]::WriteAllText($promptFile, $fullPrompt, [System.Text.Encoding]::UTF8)
 
+    Write-Host "Starting Claude session..." -ForegroundColor Green
+    Write-Host "Log:    $logFile" -ForegroundColor DarkGray
+    Write-Host ""
+
+    try {
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = "claude"
+        $psi.Arguments = "-p - --allowedTools Read Write Edit Bash Glob Grep --max-turns 50 --max-budget-usd $MaxBudget --verbose"
+        $psi.WorkingDirectory = $ProjectRoot
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+
+        $proc = [System.Diagnostics.Process]::new()
+        $proc.StartInfo = $psi
+
+        $logLines = [System.Collections.Generic.List[string]]::new()
+
+        $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
+            if ($null -ne $EventArgs.Data) {
+                Write-Host $EventArgs.Data
+                $Event.MessageData.Add($EventArgs.Data)
+            }
+        } -MessageData $logLines
+
+        $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+            if ($null -ne $EventArgs.Data) {
+                Write-Host "[STDERR] $($EventArgs.Data)" -ForegroundColor Red
+                $Event.MessageData.Add("[STDERR] $($EventArgs.Data)")
+            }
+        } -MessageData $logLines
+
+        $proc.Start() | Out-Null
+        $proc.BeginOutputReadLine()
+        $proc.BeginErrorReadLine()
+
+        $proc.StandardInput.Write($fullPrompt)
+        $proc.StandardInput.Close()
+
+        $proc.WaitForExit()
+        $exitCode = $proc.ExitCode
+
+        Start-Sleep -Milliseconds 300
+
+        $logLines | Out-File -FilePath $logFile -Encoding utf8
+
+        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+        Remove-Job -Name $outEvent.Name -Force -ErrorAction SilentlyContinue
+        Remove-Job -Name $errEvent.Name -Force -ErrorAction SilentlyContinue
+        $proc.Dispose()
+
+        $outputText = $logLines -join "`n"
+
+        Write-Host ""
         if ($exitCode -ne 0) {
-            Write-Host "WARNUNG: Claude beendet mit Exit-Code $exitCode" -ForegroundColor Red
-            Write-Host "Details im Log: $logFile" -ForegroundColor Red
-            return $false
+            Write-Host "WARNING: Claude exited with code $exitCode" -ForegroundColor Red
+            return @{ Success = $false; Output = $outputText }
         }
 
-        # Letzte 5 Zeilen als Zusammenfassung anzeigen
-        $lastLines = ($output | Select-Object -Last 5) -join "`n"
-        Write-Host "Ergebnis:" -ForegroundColor Green
-        Write-Host $lastLines -ForegroundColor Gray
+        Write-Host "Claude session completed successfully." -ForegroundColor Green
         Write-Host ""
-        return $true
+        return @{ Success = $true; Output = $outputText }
     }
     catch {
-        Write-Host "FEHLER: $_" -ForegroundColor Red
-        return $false
+        Write-Host "ERROR: $_" -ForegroundColor Red
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+        return @{ Success = $false; Output = $_.ToString() }
+    }
+    finally {
+        if (Test-Path $promptFile) { Remove-Item $promptFile -Force -ErrorAction SilentlyContinue }
     }
 }
 
 function Confirm-BuildSuccess {
-    Write-Host "Pruefe Build..." -ForegroundColor Yellow
-    $buildOutput = dotnet build 2>&1
+    Write-Host "Checking build..." -ForegroundColor Yellow
+    $slnFile = Get-ChildItem -Path $ProjectRoot -Filter "*.sln" -Depth 0 -ErrorAction SilentlyContinue | Select-Object -First 1
+    $csprojFile = Get-ChildItem -Path $ProjectRoot -Filter "*.csproj" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+    $buildTarget = if ($slnFile) { $slnFile.FullName } elseif ($csprojFile) { $csprojFile.FullName } else { $null }
+
+    if (-not $buildTarget) {
+        Write-Host "No .sln or .csproj found - skipping build check." -ForegroundColor Yellow
+        return $true
+    }
+
+    Write-Host "Building: $buildTarget" -ForegroundColor DarkGray
+    $buildOutput = & dotnet build $buildTarget 2>&1 | ForEach-Object { $_.ToString() }
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "BUILD FEHLGESCHLAGEN!" -ForegroundColor Red
-        $buildOutput | Select-Object -Last 10 | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+        Write-Host "BUILD FAILED!" -ForegroundColor Red
+        $buildOutput | Select-Object -Last 15 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         return $false
     }
-    Write-Host "Build erfolgreich." -ForegroundColor Green
+    Write-Host "Build OK." -ForegroundColor Green
     return $true
 }
 
-# ── Todos nach Phase gruppieren ──────────────────────────────────────────────
+# -- Main execution ------------------------------------------------------------
 
-$Phases = @{}
-foreach ($todo in $AllTodos) {
-    $p = [int]$todo.phase
-    if (-not $Phases.ContainsKey($p)) { $Phases[$p] = @() }
-    $Phases[$p] += @{
-        Name   = $todo.name
-        Title  = $todo.title
-        Prompt = $todo.prompt
-    }
-}
-
-# ── Hauptlogik ────────────────────────────────────────────────────────────────
+$totalSteps = $AllSteps.Count
 
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
-Write-Host "║         SpeiseDirekt - Claude Worker Agent                  ║" -ForegroundColor Magenta
-Write-Host "║         Autonome Phasen-Orchestrierung                     ║" -ForegroundColor Magenta
-Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+Write-Host "======================================================================" -ForegroundColor Magenta
+Write-Host "  ClaudeCodeOrchestrator - Worker Agent" -ForegroundColor Magenta
+Write-Host "  Sequential Step Execution" -ForegroundColor Magenta
+Write-Host "======================================================================" -ForegroundColor Magenta
 Write-Host ""
-
-if (-not $Phases.ContainsKey($Phase)) {
-    Write-Host "Phase $Phase nicht definiert. Verfuegbare Phasen: $($Phases.Keys -join ', ')" -ForegroundColor Red
-    exit 1
-}
-
-$steps = $Phases[$Phase]
-$totalSteps = $steps.Count
-
-Write-Host "Plan: $PlanPath" -ForegroundColor DarkGray
-Write-Host "Phase $Phase | $totalSteps Schritte | Start bei Schritt $Step | Budget: `$$MaxBudget/Schritt" -ForegroundColor White
-if ($DryRun) { Write-Host "[DRY RUN MODUS]" -ForegroundColor Yellow }
+Write-Host "Plan:   $PlanPath" -ForegroundColor DarkGray
+Write-Host "$totalSteps steps | Starting at step $Step | Budget: `$$MaxBudget/step" -ForegroundColor White
+if ($DryRun) { Write-Host "[DRY RUN MODE]" -ForegroundColor Yellow }
 Write-Host ""
 
 Set-Location $ProjectRoot
 
 for ($i = ($Step - 1); $i -lt $totalSteps; $i++) {
-    $currentStep = $steps[$i]
+    $current = $AllSteps[$i]
     $stepNum = $i + 1
 
-    Write-StepHeader -PhaseNum $Phase -StepNum "$stepNum/$totalSteps" -Title $currentStep.Title
+    Write-StepHeader -StepNum $stepNum -Total $totalSteps -Title $current.title
 
-    $success = Invoke-Claude -Prompt $currentStep.Prompt -StepName "phase${Phase}_${stepNum}_$($currentStep.Name)"
+    # Build prompt with context from previous steps
+    $contextSection = Build-ContextSection -CurrentStep $stepNum
+    $taskPrompt = if ($contextSection) {
+        "${contextSection}TASK:`n$($current.prompt)"
+    } else {
+        "TASK:`n$($current.prompt)"
+    }
 
-    if (-not $success -and -not $DryRun) {
+    $result = Invoke-Claude -Prompt $taskPrompt -StepName "step${stepNum}_$($current.name)"
+
+    # Store result for context sharing
+    $StepResults[$stepNum] = @{
+        Name   = $current.name
+        Title  = $current.title
+        Result = $result.Output
+    }
+
+    if (-not $result.Success -and -not $DryRun) {
         Write-Host ""
-        Write-Host "Schritt $stepNum fehlgeschlagen. Abbruch." -ForegroundColor Red
-        Write-Host "Zum Fortsetzen: .\claude-worker-agent.ps1 -Phase $Phase -Step $stepNum" -ForegroundColor Yellow
+        Write-Host "Step $stepNum failed. Aborting." -ForegroundColor Red
+        Write-Host "To resume: .\claude-worker-agent.ps1 -Step $stepNum" -ForegroundColor Yellow
         exit 1
     }
 
-    # Build-Check nach jedem Schritt (ausser DryRun)
+    # Build check after each step (except DryRun)
     if (-not $DryRun) {
         if (-not (Confirm-BuildSuccess)) {
             Write-Host ""
-            Write-Host "Build fehlgeschlagen nach Schritt $stepNum. Versuche automatische Reparatur..." -ForegroundColor Yellow
+            Write-Host "Build failed after step $stepNum. Attempting auto-fix..." -ForegroundColor Yellow
 
-            $fixSuccess = Invoke-Claude -Prompt "Der Build ist fehlgeschlagen. Lies die Build-Fehler mit 'dotnet build' und behebe alle Compile-Errors. Committe den Fix." -StepName "phase${Phase}_${stepNum}_fix"
+            $fixResult = Invoke-Claude -Prompt "The build failed. Run 'dotnet build', read the errors, and fix all compile errors. Commit the fix." -StepName "step${stepNum}_fix"
 
-            if (-not $fixSuccess -or -not (Confirm-BuildSuccess)) {
-                Write-Host "Automatische Reparatur fehlgeschlagen. Abbruch." -ForegroundColor Red
-                Write-Host "Zum Fortsetzen: .\claude-worker-agent.ps1 -Phase $Phase -Step $stepNum" -ForegroundColor Yellow
+            if (-not $fixResult.Success -or -not (Confirm-BuildSuccess)) {
+                Write-Host "Auto-fix failed. Aborting." -ForegroundColor Red
+                Write-Host "To resume: .\claude-worker-agent.ps1 -Step $stepNum" -ForegroundColor Yellow
                 exit 1
             }
         }
     }
 
-    Write-Host "Schritt $stepNum/$totalSteps abgeschlossen." -ForegroundColor Green
+    Write-Host "Step $stepNum/$totalSteps completed." -ForegroundColor Green
 }
 
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "  Phase $Phase vollstaendig abgeschlossen!" -ForegroundColor Green
-Write-Host "════════════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "======================================================================" -ForegroundColor Green
+Write-Host "  All $totalSteps steps completed!" -ForegroundColor Green
+Write-Host "======================================================================" -ForegroundColor Green
 Write-Host ""
-
-if ($Phase -lt ($Phases.Keys | Measure-Object -Maximum).Maximum) {
-    $nextPhase = $Phase + 1
-    Write-Host "Naechste Phase: .\claude-worker-agent.ps1 -Phase $nextPhase" -ForegroundColor Cyan
-}
