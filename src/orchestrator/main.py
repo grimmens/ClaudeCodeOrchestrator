@@ -17,6 +17,7 @@ from .ui.settings_dialog import SettingsDialog
 from .ui.history_viewer import HistoryViewer
 from .ui.log_viewer import LogViewer
 from .ui.step_editor_dialog import StepEditorDialog
+from .ui.extend_plan_dialog import ExtendPlanDialog
 
 
 class OrchestratorApp:
@@ -60,6 +61,7 @@ class OrchestratorApp:
         edit_menu = tk.Menu(menubar, tearoff=0)
         edit_menu.add_command(label="Settings", command=self._open_settings)
         edit_menu.add_separator()
+        edit_menu.add_command(label="Extend Plan", command=self._extend_plan)
         edit_menu.add_command(label="Create Snapshot", command=self._create_snapshot_from_menu)
         menubar.add_cascade(label="Edit", menu=edit_menu)
 
@@ -194,9 +196,11 @@ class OrchestratorApp:
         ttk.Button(btn_frame, text="Import JSON", command=self._import_json).pack(fill=tk.X, pady=1)
         ttk.Button(btn_frame, text="View Logs", command=self._view_logs).pack(fill=tk.X, pady=1)
         ttk.Button(btn_frame, text="History", command=self._view_history).pack(fill=tk.X, pady=1)
+        ttk.Button(btn_frame, text="Extend Plan", command=self._extend_plan).pack(fill=tk.X, pady=1)
 
         # Right-click context menu on plan listbox
         self._plan_context_menu = tk.Menu(self.plan_listbox, tearoff=0)
+        self._plan_context_menu.add_command(label="Extend Plan", command=self._extend_plan)
         self._plan_context_menu.add_command(label="View History", command=self._view_history)
         self._plan_context_menu.add_command(label="View Logs", command=self._view_logs)
         self._plan_context_menu.add_separator()
@@ -279,6 +283,7 @@ class OrchestratorApp:
         self.step_tree.tag_configure("succeeded", background="#E8F5E9")
         self.step_tree.tag_configure("failed", background="#FFEBEE")
         self.step_tree.tag_configure("skipped", background="#F5F5F5")
+        self.step_tree.tag_configure("section_divider", background="#B0BEC5", foreground="#455A64")
 
         # Right-click context menu
         self._step_context_menu = tk.Menu(self.step_tree, tearoff=0)
@@ -342,7 +347,23 @@ class OrchestratorApp:
         if not self.current_plan:
             return
         self.steps = self.db.get_steps_for_plan(self.current_plan.id)
+
+        # Determine if we need a divider between completed and pending sections
+        completed_statuses = {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+        pending_statuses = {StepStatus.PENDING, StepStatus.QUEUED}
+        has_completed = any(s.status in completed_statuses for s in self.steps)
+        has_pending = any(s.status in pending_statuses for s in self.steps)
+        need_divider = has_completed and has_pending
+        divider_inserted = False
+
         for s in self.steps:
+            # Insert divider before first pending/queued step if there are completed steps above
+            if need_divider and not divider_inserted and s.status in pending_statuses:
+                self.step_tree.insert("", tk.END, iid="__divider__", values=(
+                    "", "\u2500\u2500\u2500", "New / Pending Steps", "", "",
+                ), tags=("section_divider",))
+                divider_inserted = True
+
             prompt_preview = (s.prompt[:60] + "\u2026") if len(s.prompt) > 60 else s.prompt
             self.step_tree.insert("", tk.END, iid=s.id, values=(
                 s.queue_position + 1, s.name, s.title, s.status.value, prompt_preview,
@@ -454,6 +475,29 @@ class OrchestratorApp:
             messagebox.showinfo("Import", "Parsed with fixups:\n" + "\n".join(warnings))
 
         ImportPreviewDialog(self.root, self.db, steps_data, on_saved=self._load_plans)
+
+    def _extend_plan(self):
+        if not self.current_plan:
+            messagebox.showwarning("Extend Plan", "No plan selected.")
+            return
+        if self._is_plan_running():
+            messagebox.showwarning("Extend Plan", "Cannot extend a running plan. Stop it first.")
+            return
+
+        # Auto-create a history snapshot before extending
+        steps = self.db.get_steps_for_plan(self.current_plan.id)
+        has_results = any(s.status != StepStatus.PENDING for s in steps)
+        if has_results:
+            from datetime import datetime
+            snap_name = f"pre-extend-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            self.db.create_history_snapshot(self.current_plan.id, snap_name,
+                                           "Auto-snapshot before plan extension")
+
+        def _on_saved():
+            self._load_steps()
+            self._update_status_bar()
+
+        ExtendPlanDialog(self.root, self.db, self.current_plan.id, on_saved=_on_saved)
 
     def _set_project_path(self):
         if not self.current_plan:
@@ -748,11 +792,24 @@ class OrchestratorApp:
             self.step_tree.delete(item)
         status_filter = self.filter_var.get().lower()
         search_text = self.step_search_var.get().strip().lower()
-        for s in self.steps:
-            if status_filter != "all" and s.status.value != status_filter:
-                continue
-            if search_text and search_text not in s.name.lower() and search_text not in s.title.lower():
-                continue
+
+        completed_statuses = {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+        pending_statuses = {StepStatus.PENDING, StepStatus.QUEUED}
+        filtered = [s for s in self.steps
+                    if (status_filter == "all" or s.status.value == status_filter)
+                    and (not search_text or search_text in s.name.lower() or search_text in s.title.lower())]
+        has_completed = any(s.status in completed_statuses for s in filtered)
+        has_pending = any(s.status in pending_statuses for s in filtered)
+        need_divider = has_completed and has_pending and status_filter == "all"
+        divider_inserted = False
+
+        for s in filtered:
+            if need_divider and not divider_inserted and s.status in pending_statuses:
+                self.step_tree.insert("", tk.END, iid="__divider__", values=(
+                    "", "\u2500\u2500\u2500", "New / Pending Steps", "", "",
+                ), tags=("section_divider",))
+                divider_inserted = True
+
             prompt_preview = (s.prompt[:60] + "\u2026") if len(s.prompt) > 60 else s.prompt
             self.step_tree.insert("", tk.END, iid=s.id, values=(
                 s.queue_position + 1, s.name, s.title, s.status.value, prompt_preview,
