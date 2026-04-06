@@ -1,6 +1,7 @@
 import json
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
@@ -35,12 +36,15 @@ class OrchestratorApp:
         self.current_plan: Plan | None = None
         self.steps: list[PlanStep] = []
 
-        # Per-plan execution state: plan_id -> {cancel_event, ui_queue, output_lines}
+        # Per-plan execution state: plan_id -> {cancel_event, ui_queue, output_lines, start_time}
         self._plan_executions: dict[str, dict] = {}
         self._polling = False
+        self._elapsed_timer_id: str | None = None
 
         self._build_menu()
+        self._build_toolbar()
         self._build_ui()
+        self._bind_shortcuts()
         self._load_plans()
         self._setup_drag_and_drop()
 
@@ -93,6 +97,40 @@ class OrchestratorApp:
             file_path = file_path[1:-1]
         if file_path.lower().endswith(".json"):
             self._import_json(file_path)
+
+    # ── Toolbar ──────────────────────────────────────────────────
+
+    def _build_toolbar(self):
+        toolbar = ttk.Frame(self.root)
+        toolbar.pack(fill=tk.X, side=tk.TOP)
+
+        buttons = [
+            ("\U0001F4C4 New", self._new_plan),
+            ("\U0001F504 Extend", self._extend_plan),
+            ("\u25B6 Run", self._run_queue),
+            ("\u23F9 Stop", self._stop_queue),
+            ("\U0001F4DC History", self._view_history),
+            ("\u2699 Settings", self._open_settings),
+        ]
+        for text, cmd in buttons:
+            ttk.Button(toolbar, text=text, command=cmd).pack(side=tk.LEFT, padx=2, pady=2)
+
+    # ── Keyboard Shortcuts ───────────────────────────────────────
+
+    def _bind_shortcuts(self):
+        self.root.bind("<Control-n>", lambda e: self._new_plan())
+        self.root.bind("<Control-e>", lambda e: self._extend_plan())
+        self.root.bind("<Control-r>", lambda e: self._run_queue())
+        self.root.bind("<Escape>", lambda e: self._stop_queue())
+        self.root.bind("<Control-h>", lambda e: self._view_history())
+        self.root.bind("<Delete>", lambda e: self._delete_step())
+        self.root.bind("<Control-Up>", lambda e: self._move_step_up())
+        self.root.bind("<Control-Down>", lambda e: self._move_step_down())
+        self.root.bind("<F5>", lambda e: self._refresh_all())
+
+    def _refresh_all(self):
+        self._load_plans()
+        self._refresh_steps()
 
     # ── Menu Actions ─────────────────────────────────────────────
 
@@ -165,6 +203,11 @@ class OrchestratorApp:
         right_pane.add(bottom_frame, weight=1)
         self._build_output_viewer(bottom_frame)
 
+        # Progress bar (hidden by default)
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(self.root, variable=self.progress_var,
+                                            maximum=100, mode="determinate")
+
         # Status bar
         self.status_var = tk.StringVar(value="No plan selected")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
@@ -172,6 +215,15 @@ class OrchestratorApp:
 
     def _build_left_pane(self, parent: ttk.Frame):
         ttk.Label(parent, text="Plans", font=("Segoe UI", 12, "bold")).pack(padx=5, pady=(5, 2), anchor=tk.W)
+
+        # Plan search/filter
+        search_frame = ttk.Frame(parent)
+        search_frame.pack(fill=tk.X, padx=5, pady=(0, 2))
+        ttk.Label(search_frame, text="\U0001F50D").pack(side=tk.LEFT)
+        self.plan_search_var = tk.StringVar()
+        plan_search_entry = ttk.Entry(search_frame, textvariable=self.plan_search_var)
+        plan_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        self.plan_search_var.trace_add("write", lambda *_: self._filter_plan_list())
 
         # Plan listbox with scrollbar
         list_frame = ttk.Frame(parent)
@@ -319,6 +371,7 @@ class OrchestratorApp:
         out_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.output_text.pack(fill=tk.BOTH, expand=True)
         self.output_text.tag_configure("search_highlight", background="#FFFF00")
+        self.output_text.bind("<Double-1>", self._open_fullscreen_result)
 
         # Search bar for result text
         search_bar = ttk.Frame(parent)
@@ -338,17 +391,60 @@ class OrchestratorApp:
         cur_sel = self.plan_listbox.curselection()
         cur_idx = cur_sel[0] if cur_sel else None
 
-        self.plan_listbox.delete(0, tk.END)
         self._plans = self.db.get_plans()
+        # Cache step data per plan for display
+        self._plan_step_cache: dict[str, list[PlanStep]] = {}
         for p in self._plans:
-            created = p.created_at[:10] if p.created_at else ""
-            running = "  [RUNNING]" if p.id in self._plan_executions else ""
-            lineage = self._get_lineage_label(p)
-            self.plan_listbox.insert(tk.END, f"{p.name}  ({created}){running}{lineage}")
+            self._plan_step_cache[p.id] = self.db.get_steps_for_plan(p.id)
 
-        # Restore selection
-        if cur_idx is not None and cur_idx < len(self._plans):
-            self.plan_listbox.selection_set(cur_idx)
+        self._filter_plan_list(restore_idx=cur_idx)
+
+    def _filter_plan_list(self, *_args, restore_idx: int | None = None):
+        """Rebuild the plan listbox applying the search filter."""
+        cur_sel = self.plan_listbox.curselection()
+        cur_idx = restore_idx if restore_idx is not None else (cur_sel[0] if cur_sel else None)
+
+        search = self.plan_search_var.get().strip().lower() if hasattr(self, "plan_search_var") else ""
+        self.plan_listbox.delete(0, tk.END)
+        self._filtered_plan_indices: list[int] = []
+
+        for i, p in enumerate(self._plans):
+            if search and search not in p.name.lower():
+                continue
+            self._filtered_plan_indices.append(i)
+            steps = self._plan_step_cache.get(p.id, [])
+            badge, fg_color = self._get_plan_status_badge(p, steps)
+            succeeded = sum(1 for s in steps if s.status == StepStatus.SUCCEEDED)
+            total = len(steps)
+            lineage_prefix = "\u2514\u2500 " if p.parent_plan_id else ""
+            running = " [RUNNING]" if p.id in self._plan_executions else ""
+            label = f"{badge} {lineage_prefix}{p.name}  ({succeeded}/{total}){running}"
+            self.plan_listbox.insert(tk.END, label)
+            list_idx = self.plan_listbox.size() - 1
+            self.plan_listbox.itemconfig(list_idx, fg=fg_color)
+
+        if cur_idx is not None:
+            # Find the filtered position for the original index
+            if cur_idx in self._filtered_plan_indices:
+                new_pos = self._filtered_plan_indices.index(cur_idx)
+                self.plan_listbox.selection_set(new_pos)
+
+    def _get_plan_status_badge(self, plan: Plan, steps: list[PlanStep]) -> tuple[str, str]:
+        """Return (badge_char, color) for the plan's overall status."""
+        if plan.id in self._plan_executions:
+            return ("\u25CF", "#FFC107")  # yellow dot - in progress
+        if not steps:
+            return ("\u25CB", "#9E9E9E")  # gray circle - no steps
+        statuses = {s.status for s in steps}
+        if all(s.status == StepStatus.SUCCEEDED for s in steps):
+            return ("\u25CF", "#4CAF50")  # green dot - all succeeded
+        if StepStatus.FAILED in statuses:
+            return ("\u25CF", "#F44336")  # red dot - has failures
+        if StepStatus.RUNNING in statuses:
+            return ("\u25CF", "#FFC107")  # yellow dot - running
+        if any(s.status == StepStatus.SUCCEEDED for s in steps):
+            return ("\u25D4", "#2196F3")  # half circle - partially done
+        return ("\u25CB", "#9E9E9E")  # gray circle - not started
 
     def _load_steps(self):
         for item in self.step_tree.get_children():
@@ -400,11 +496,29 @@ class OrchestratorApp:
         total = len(self.steps)
         done = sum(1 for s in self.steps if s.status == StepStatus.SUCCEEDED)
         running_count = len(self._plan_executions)
+
+        # Cost
+        runs = self.db.get_runs_for_plan(self.current_plan.id)
+        total_cost = sum(r.cost_usd or 0 for r in runs)
+        cost_str = f"${total_cost:.2f}" if total_cost > 0 else "$0.00"
+
+        # Elapsed time
+        elapsed_str = ""
+        exec_ctx = self._plan_executions.get(self.current_plan.id)
+        if exec_ctx and "start_time" in exec_ctx:
+            elapsed = time.time() - exec_ctx["start_time"]
+            mins, secs = divmod(int(elapsed), 60)
+            elapsed_str = f"  |  Elapsed: {mins}m {secs}s"
+
+        # Snapshot count
+        snapshots = self.db.get_history_for_plan(self.current_plan.id)
+        snap_str = f"  |  Snapshots: {len(snapshots)}" if snapshots else ""
+
         running_suffix = f"  |  {running_count} plan(s) running" if running_count else ""
         self.status_var.set(
             f"Plan: {self.current_plan.name}  |  "
-            f"Path: {self.current_plan.project_root or '(not set)'}  |  "
-            f"Steps: {done}/{total} completed{running_suffix}"
+            f"Steps: {done}/{total}  |  "
+            f"Cost: {cost_str}{snap_str}{elapsed_str}{running_suffix}"
         )
 
     # ── Event Handlers ───────────────────────────────────────────
@@ -413,7 +527,13 @@ class OrchestratorApp:
         sel = self.plan_listbox.curselection()
         if not sel:
             return
-        self.current_plan = self._plans[sel[0]]
+        # Map filtered listbox index back to the original plan index
+        filtered_idx = sel[0]
+        if hasattr(self, "_filtered_plan_indices") and filtered_idx < len(self._filtered_plan_indices):
+            original_idx = self._filtered_plan_indices[filtered_idx]
+        else:
+            original_idx = filtered_idx
+        self.current_plan = self._plans[original_idx]
         self.path_var.set(self.current_plan.project_root)
         self._load_steps()
         self._sync_run_buttons()
@@ -678,11 +798,21 @@ class OrchestratorApp:
             "cancel_event": cancel_event,
             "ui_queue": ui_q,
             "output_lines": [],
+            "start_time": time.time(),
+            "total_steps": len(pending),
+            "completed_steps": 0,
         }
 
         self._sync_run_buttons()
         self._set_output_text("")
         self._update_plan_list_labels()
+
+        # Show progress bar
+        self.progress_var.set(0)
+        self.progress_bar.pack(fill=tk.X, side=tk.BOTTOM, before=self.main_pane)
+
+        # Start elapsed time timer
+        self._start_elapsed_timer()
 
         self.orchestrator.include_context = self.include_context_var.get()
 
@@ -753,11 +883,19 @@ class OrchestratorApp:
 
                     elif msg_type == "step_completed":
                         _, step = data
+                        ctx["completed_steps"] = ctx.get("completed_steps", 0) + 1
+                        total_s = ctx.get("total_steps", 1)
+                        if total_s > 0:
+                            self.progress_var.set(ctx["completed_steps"] / total_s * 100)
                         if is_visible:
                             self._update_step_row(step)
 
                     elif msg_type == "step_failed":
                         _, step, error = data
+                        ctx["completed_steps"] = ctx.get("completed_steps", 0) + 1
+                        total_s = ctx.get("total_steps", 1)
+                        if total_s > 0:
+                            self.progress_var.set(ctx["completed_steps"] / total_s * 100)
                         if is_visible:
                             self._update_step_row(step)
 
@@ -779,45 +917,36 @@ class OrchestratorApp:
         self._plan_executions.pop(plan_id, None)
         self._update_plan_list_labels()
 
+        # Hide progress bar if no more running plans
+        if not self._plan_executions:
+            self.progress_bar.pack_forget()
+            self.progress_var.set(0)
+            self._stop_elapsed_timer()
+
         is_visible = self.current_plan and self.current_plan.id == plan_id
+        steps = self.db.get_steps_for_plan(plan_id)
+        succeeded = sum(1 for s in steps if s.status == StepStatus.SUCCEEDED)
+        failed = sum(1 for s in steps if s.status == StepStatus.FAILED)
+        total = len(steps)
+
         if is_visible:
             self._sync_run_buttons()
             self._load_steps()
             self._update_status_bar()
-
-            steps = self.db.get_steps_for_plan(plan_id)
-            succeeded = sum(1 for s in steps if s.status == StepStatus.SUCCEEDED)
-            failed = sum(1 for s in steps if s.status == StepStatus.FAILED)
-            total = len(steps)
-            messagebox.showinfo(
-                "Execution Complete",
-                f"Plan '{self.current_plan.name}' finished:\n"
-                f"{succeeded} succeeded, {failed} failed, {total} total steps.",
-            )
+            self._show_toast(f"Plan completed: {succeeded}/{total} steps succeeded"
+                             + (f", {failed} failed" if failed else ""))
         else:
-            # Show a non-blocking notification for background plan
             plan = self.db.get_plan(plan_id)
             plan_name = plan.name if plan else plan_id
             self._update_status_bar()
-            messagebox.showinfo(
-                "Execution Complete",
-                f"Background plan '{plan_name}' has finished.",
-            )
+            self._show_toast(f"Background plan '{plan_name}' finished: {succeeded}/{total} succeeded")
 
     def _update_plan_list_labels(self):
         """Refresh the plan list labels to show/hide running indicators."""
-        cur_sel = self.plan_listbox.curselection()
-        cur_idx = cur_sel[0] if cur_sel else None
-
-        self.plan_listbox.delete(0, tk.END)
+        # Refresh step cache and rebuild filtered list
         for p in self._plans:
-            created = p.created_at[:10] if p.created_at else ""
-            running = "  [RUNNING]" if p.id in self._plan_executions else ""
-            lineage = self._get_lineage_label(p)
-            self.plan_listbox.insert(tk.END, f"{p.name}  ({created}){running}{lineage}")
-
-        if cur_idx is not None and cur_idx < len(self._plans):
-            self.plan_listbox.selection_set(cur_idx)
+            self._plan_step_cache[p.id] = self.db.get_steps_for_plan(p.id)
+        self._filter_plan_list()
 
     def _get_lineage_label(self, plan: Plan) -> str:
         """Return a lineage indicator string if the plan has a parent."""
@@ -979,11 +1108,19 @@ class OrchestratorApp:
             "cancel_event": cancel_event,
             "ui_queue": ui_q,
             "output_lines": [],
+            "start_time": time.time(),
+            "total_steps": 1,
+            "completed_steps": 0,
         }
 
         self._sync_run_buttons()
         self._set_output_text("")
         self._update_plan_list_labels()
+
+        # Show progress bar
+        self.progress_var.set(0)
+        self.progress_bar.pack(fill=tk.X, side=tk.BOTTOM, before=self.main_pane)
+        self._start_elapsed_timer()
 
         step_id = step.id
         self.orchestrator.include_context = self.include_context_var.get()
@@ -1093,6 +1230,72 @@ class OrchestratorApp:
             self.plan_listbox.selection_set(idx)
             self.plan_listbox.event_generate("<<ListboxSelect>>")
             self._plan_context_menu.tk_popup(event.x_root, event.y_root)
+
+    # ── Toast Notifications ──────────────────────────────────────
+
+    def _show_toast(self, message: str, duration: int = 4000):
+        """Show a temporary toast notification at the bottom of the window."""
+        toast = tk.Toplevel(self.root)
+        toast.overrideredirect(True)
+        toast.attributes("-topmost", True)
+
+        lbl = tk.Label(toast, text=message, bg="#323232", fg="white",
+                       font=("Segoe UI", 10), padx=16, pady=8)
+        lbl.pack()
+
+        # Position at bottom-center of main window
+        self.root.update_idletasks()
+        rx = self.root.winfo_rootx()
+        ry = self.root.winfo_rooty()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        toast.update_idletasks()
+        tw = toast.winfo_width()
+        x = rx + (rw - tw) // 2
+        y = ry + rh - 60
+        toast.geometry(f"+{x}+{y}")
+
+        toast.after(duration, toast.destroy)
+
+    # ── Full-screen Result Viewer ─────────────────────────────────
+
+    def _open_fullscreen_result(self, event=None):
+        """Open the current result text in a maximized window."""
+        content = self.output_text.get("1.0", tk.END).strip()
+        if not content or content == "No result yet":
+            return
+        step = self._get_selected_step()
+        title = f"Result: {step.title}" if step else "Result"
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.state("zoomed")
+        text_frame = ttk.Frame(win)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        text = tk.Text(text_frame, wrap=tk.WORD, font=("Consolas", 10))
+        scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(fill=tk.BOTH, expand=True)
+        text.insert("1.0", content)
+        text.config(state=tk.DISABLED)
+
+    # ── Elapsed Time Timer ────────────────────────────────────────
+
+    def _start_elapsed_timer(self):
+        self._stop_elapsed_timer()
+        self._tick_elapsed()
+
+    def _stop_elapsed_timer(self):
+        if self._elapsed_timer_id:
+            self.root.after_cancel(self._elapsed_timer_id)
+            self._elapsed_timer_id = None
+
+    def _tick_elapsed(self):
+        if self._plan_executions:
+            self._update_status_bar()
+            self._elapsed_timer_id = self.root.after(1000, self._tick_elapsed)
+        else:
+            self._elapsed_timer_id = None
 
     # ── Helpers ───────────────────────────────────────────────────
 
