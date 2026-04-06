@@ -18,6 +18,7 @@ from .ui.history_viewer import HistoryViewer
 from .ui.log_viewer import LogViewer
 from .ui.step_editor_dialog import StepEditorDialog
 from .ui.extend_plan_dialog import ExtendPlanDialog
+from .ui.derive_plan_dialog import DerivePlanDialog
 
 
 class OrchestratorApp:
@@ -51,6 +52,7 @@ class OrchestratorApp:
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="New Plan", command=self._new_plan)
+        file_menu.add_command(label="New Plan from Existing...", command=self._derive_plan)
         file_menu.add_command(label="Import Plan", command=self._import_json)
         file_menu.add_command(label="Export Plan", command=self._export_json)
         file_menu.add_separator()
@@ -201,6 +203,7 @@ class OrchestratorApp:
         # Right-click context menu on plan listbox
         self._plan_context_menu = tk.Menu(self.plan_listbox, tearoff=0)
         self._plan_context_menu.add_command(label="Extend Plan", command=self._extend_plan)
+        self._plan_context_menu.add_command(label="New Plan from Existing...", command=self._derive_plan)
         self._plan_context_menu.add_command(label="View History", command=self._view_history)
         self._plan_context_menu.add_command(label="View Logs", command=self._view_logs)
         self._plan_context_menu.add_separator()
@@ -236,7 +239,7 @@ class OrchestratorApp:
         ttk.Label(toolbar, text="Filter:").pack(side=tk.LEFT, padx=(0, 2))
         self.filter_var = tk.StringVar(value="All")
         filter_combo = ttk.Combobox(toolbar, textvariable=self.filter_var, width=10,
-                                    values=["All", "Pending", "Running", "Succeeded", "Failed", "Skipped"],
+                                    values=["All", "Pending", "Running", "Succeeded", "Failed", "Skipped", "Reference"],
                                     state="readonly")
         filter_combo.pack(side=tk.LEFT, padx=2)
         filter_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_step_filter())
@@ -283,6 +286,7 @@ class OrchestratorApp:
         self.step_tree.tag_configure("succeeded", background="#E8F5E9")
         self.step_tree.tag_configure("failed", background="#FFEBEE")
         self.step_tree.tag_configure("skipped", background="#F5F5F5")
+        self.step_tree.tag_configure("reference", background="#F3E5F5")
         self.step_tree.tag_configure("section_divider", background="#B0BEC5", foreground="#455A64")
 
         # Right-click context menu
@@ -334,7 +338,8 @@ class OrchestratorApp:
         for p in self._plans:
             created = p.created_at[:10] if p.created_at else ""
             running = "  [RUNNING]" if p.id in self._plan_executions else ""
-            self.plan_listbox.insert(tk.END, f"{p.name}  ({created}){running}")
+            lineage = self._get_lineage_label(p)
+            self.plan_listbox.insert(tk.END, f"{p.name}  ({created}){running}{lineage}")
 
         # Restore selection
         if cur_idx is not None and cur_idx < len(self._plans):
@@ -349,7 +354,8 @@ class OrchestratorApp:
         self.steps = self.db.get_steps_for_plan(self.current_plan.id)
 
         # Determine if we need a divider between completed and pending sections
-        completed_statuses = {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+        completed_statuses = {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED,
+                              StepStatus.REFERENCE}
         pending_statuses = {StepStatus.PENDING, StepStatus.QUEUED}
         has_completed = any(s.status in completed_statuses for s in self.steps)
         has_pending = any(s.status in pending_statuses for s in self.steps)
@@ -498,6 +504,26 @@ class OrchestratorApp:
             self._update_status_bar()
 
         ExtendPlanDialog(self.root, self.db, self.current_plan.id, on_saved=_on_saved)
+
+    def _derive_plan(self):
+        plans = self.db.get_plans()
+        if not plans:
+            messagebox.showwarning("New Plan from Existing", "No plans available.")
+            return
+        selected_id = self.current_plan.id if self.current_plan else None
+
+        def _on_saved(new_plan_id: str):
+            self._load_plans()
+            # Select the newly created plan
+            for i, p in enumerate(self._plans):
+                if p.id == new_plan_id:
+                    self.plan_listbox.selection_clear(0, tk.END)
+                    self.plan_listbox.selection_set(i)
+                    self.plan_listbox.event_generate("<<ListboxSelect>>")
+                    break
+
+        DerivePlanDialog(self.root, self.db, plans, selected_plan_id=selected_id,
+                         on_saved=_on_saved)
 
     def _set_project_path(self):
         if not self.current_plan:
@@ -758,10 +784,20 @@ class OrchestratorApp:
         for p in self._plans:
             created = p.created_at[:10] if p.created_at else ""
             running = "  [RUNNING]" if p.id in self._plan_executions else ""
-            self.plan_listbox.insert(tk.END, f"{p.name}  ({created}){running}")
+            lineage = self._get_lineage_label(p)
+            self.plan_listbox.insert(tk.END, f"{p.name}  ({created}){running}{lineage}")
 
         if cur_idx is not None and cur_idx < len(self._plans):
             self.plan_listbox.selection_set(cur_idx)
+
+    def _get_lineage_label(self, plan: Plan) -> str:
+        """Return a lineage indicator string if the plan has a parent."""
+        if not plan.parent_plan_id:
+            return ""
+        parent = self.db.get_plan(plan.parent_plan_id)
+        if parent:
+            return f"  \u2190 derived from {parent.name}"
+        return ""
 
     def _update_step_row(self, step: PlanStep):
         """Update a single row in the Treeview to reflect the step's current status."""
@@ -793,7 +829,8 @@ class OrchestratorApp:
         status_filter = self.filter_var.get().lower()
         search_text = self.step_search_var.get().strip().lower()
 
-        completed_statuses = {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED}
+        completed_statuses = {StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED,
+                              StepStatus.REFERENCE}
         pending_statuses = {StepStatus.PENDING, StepStatus.QUEUED}
         filtered = [s for s in self.steps
                     if (status_filter == "all" or s.status.value == status_filter)

@@ -12,6 +12,7 @@ class StepStatus(Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"
+    REFERENCE = "reference"
 
 
 @dataclass
