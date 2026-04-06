@@ -19,6 +19,7 @@ from .ui.log_viewer import LogViewer
 from .ui.step_editor_dialog import StepEditorDialog
 from .ui.extend_plan_dialog import ExtendPlanDialog
 from .ui.derive_plan_dialog import DerivePlanDialog
+from .ui.template_dialog import SaveAsTemplateDialog, CreateFromTemplateDialog
 
 
 class OrchestratorApp:
@@ -55,6 +56,9 @@ class OrchestratorApp:
         file_menu.add_command(label="New Plan from Existing...", command=self._derive_plan)
         file_menu.add_command(label="Import Plan", command=self._import_json)
         file_menu.add_command(label="Export Plan", command=self._export_json)
+        file_menu.add_separator()
+        file_menu.add_command(label="Save Plan as Template", command=self._save_as_template)
+        file_menu.add_command(label="New Plan from Template", command=self._new_from_template)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -206,6 +210,7 @@ class OrchestratorApp:
         self._plan_context_menu.add_command(label="New Plan from Existing...", command=self._derive_plan)
         self._plan_context_menu.add_command(label="View History", command=self._view_history)
         self._plan_context_menu.add_command(label="View Logs", command=self._view_logs)
+        self._plan_context_menu.add_command(label="Save as Template", command=self._save_as_template)
         self._plan_context_menu.add_separator()
         self._plan_context_menu.add_command(label="Delete Plan", command=self._delete_plan)
         self.plan_listbox.bind("<Button-3>", self._on_plan_right_click)
@@ -524,6 +529,30 @@ class OrchestratorApp:
 
         DerivePlanDialog(self.root, self.db, plans, selected_plan_id=selected_id,
                          on_saved=_on_saved)
+
+    def _save_as_template(self):
+        if not self.current_plan:
+            messagebox.showwarning("Save as Template", "No plan selected.")
+            return
+        steps = self.db.get_steps_for_plan(self.current_plan.id)
+        has_succeeded = any(s.status == StepStatus.SUCCEEDED for s in steps)
+        if not has_succeeded:
+            messagebox.showwarning("Save as Template",
+                                   "Plan must have at least one succeeded step to save as a template.")
+            return
+        SaveAsTemplateDialog(self.root, self.db, self.current_plan.id)
+
+    def _new_from_template(self):
+        def _on_saved(new_plan_id: str):
+            self._load_plans()
+            for i, p in enumerate(self._plans):
+                if p.id == new_plan_id:
+                    self.plan_listbox.selection_clear(0, tk.END)
+                    self.plan_listbox.selection_set(i)
+                    self.plan_listbox.event_generate("<<ListboxSelect>>")
+                    break
+
+        CreateFromTemplateDialog(self.root, self.db, on_saved=_on_saved)
 
     def _set_project_path(self):
         if not self.current_plan:

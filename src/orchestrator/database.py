@@ -58,6 +58,15 @@ class Database:
                 steps_json TEXT NOT NULL,
                 FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS plan_templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                steps_json TEXT NOT NULL,
+                created_from_plan_id TEXT,
+                created_at TEXT NOT NULL
+            );
         """)
         self.conn.commit()
 
@@ -236,6 +245,39 @@ class Database:
 
     def delete_history_snapshot(self, snapshot_id: str) -> None:
         self.conn.execute("DELETE FROM plan_history WHERE id = ?", (snapshot_id,))
+        self.conn.commit()
+
+    # -- Plan Templates --
+
+    def create_template(self, name: str, steps_json: str, description: str | None = None,
+                        created_from_plan_id: str | None = None) -> dict:
+        import uuid
+        template_id = str(uuid.uuid4())
+        created_at = datetime.now().isoformat()
+        self.conn.execute(
+            "INSERT INTO plan_templates (id, name, description, steps_json, created_from_plan_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (template_id, name, description, steps_json, created_from_plan_id, created_at),
+        )
+        self.conn.commit()
+        return {"id": template_id, "name": name, "description": description,
+                "steps_json": steps_json, "created_from_plan_id": created_from_plan_id,
+                "created_at": created_at}
+
+    def get_templates(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM plan_templates ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_template(self, template_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM plan_templates WHERE id = ?", (template_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def delete_template(self, template_id: str) -> None:
+        self.conn.execute("DELETE FROM plan_templates WHERE id = ?", (template_id,))
         self.conn.commit()
 
     @staticmethod
