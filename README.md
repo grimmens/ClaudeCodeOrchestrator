@@ -7,7 +7,7 @@ The orchestrator (`src/orchestrator/`) provides a tkinter GUI for creating plans
 ![alt text](show.PNG "Program")
 
 Here you can see the Program in Action
-![alt text](show.PNG "Program in Action")
+![alt text](show2.PNG "Program in Action")
 
 ### Requirements
 
