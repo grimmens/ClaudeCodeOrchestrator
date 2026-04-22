@@ -342,6 +342,10 @@ class Database:
         ).fetchall()
         return [AutoModeSession(**dict(r)) for r in rows]
 
+    def delete_auto_mode_session(self, session_id: str) -> None:
+        self.conn.execute("DELETE FROM auto_mode_sessions WHERE id = ?", (session_id,))
+        self.conn.commit()
+
     @staticmethod
     def _row_to_step(row) -> PlanStep:
         d = dict(row)

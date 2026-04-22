@@ -21,6 +21,9 @@ from .ui.step_editor_dialog import StepEditorDialog
 from .ui.extend_plan_dialog import ExtendPlanDialog
 from .ui.derive_plan_dialog import DerivePlanDialog
 from .ui.template_dialog import SaveAsTemplateDialog, CreateFromTemplateDialog
+from .services.auto_mode_orchestrator import AutoModeOrchestrator, AutoModeCallbacks
+from .ui.auto_mode_dialog import AutoModeDialog
+from .ui.auto_mode_session_viewer import AutoModeSessionViewer
 
 
 class OrchestratorApp:
@@ -41,12 +44,21 @@ class OrchestratorApp:
         self._polling = False
         self._elapsed_timer_id: str | None = None
 
+        self._auto_mode_orchestrator: AutoModeOrchestrator | None = None
+        self._auto_mode_session = None
+        self._auto_mode_ui_queue: queue.Queue = queue.Queue()
+        self._auto_mode_status: str = ""
+        self._auto_mode_current_batch: int = 1
+        self._auto_mode_current_step: int = 0
+        self._auto_mode_total_steps: int = 0
+
         self._build_menu()
         self._build_toolbar()
         self._build_ui()
         self._bind_shortcuts()
         self._load_plans()
         self._setup_drag_and_drop()
+        self._check_interrupted_sessions()
 
     # ── Menu Bar ─────────────────────────────────────────────────
 
@@ -74,6 +86,18 @@ class OrchestratorApp:
         edit_menu.add_command(label="Extend Plan", command=self._extend_plan)
         edit_menu.add_command(label="Create Snapshot", command=self._create_snapshot_from_menu)
         menubar.add_cascade(label="Edit", menu=edit_menu)
+
+        # Auto-mode menu
+        self._auto_mode_menu = tk.Menu(menubar, tearoff=0)
+        self._auto_mode_menu.add_command(label="Start Auto-mode...", command=self._start_auto_mode)
+        self._auto_mode_menu.add_command(
+            label="Stop Auto-mode", command=self._stop_auto_mode, state=tk.DISABLED
+        )
+        self._auto_mode_menu.add_separator()
+        self._auto_mode_menu.add_command(
+            label="View Sessions...", command=self._view_auto_mode_sessions
+        )
+        menubar.add_cascade(label="Auto-mode", menu=self._auto_mode_menu)
 
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -127,6 +151,7 @@ class OrchestratorApp:
         self.root.bind("<Control-Up>", lambda e: self._move_step_up())
         self.root.bind("<Control-Down>", lambda e: self._move_step_down())
         self.root.bind("<F5>", lambda e: self._refresh_all())
+        self.root.bind("<Control-A>", lambda e: self._start_auto_mode())
 
     def _refresh_all(self):
         self._load_plans()
@@ -268,9 +293,12 @@ class OrchestratorApp:
         self.plan_listbox.bind("<Button-3>", self._on_plan_right_click)
 
     def _build_step_queue(self, parent: ttk.Frame):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(2, weight=1)
+
         # Button bar
         btn_bar = ttk.Frame(parent)
-        btn_bar.pack(fill=tk.X, padx=5, pady=2)
+        btn_bar.grid(row=0, column=0, sticky="ew", padx=5, pady=2)
         for text, cmd in [
             ("Add Step", self._add_step),
             ("Edit Step", self._edit_step),
@@ -291,7 +319,7 @@ class OrchestratorApp:
 
         # Toolbar: filter, search, refresh
         toolbar = ttk.Frame(parent)
-        toolbar.pack(fill=tk.X, padx=5, pady=(2, 0))
+        toolbar.grid(row=1, column=0, sticky="ew", padx=5, pady=(2, 0))
 
         ttk.Label(toolbar, text="Filter:").pack(side=tk.LEFT, padx=(0, 2))
         self.filter_var = tk.StringVar(value="All")
@@ -311,7 +339,7 @@ class OrchestratorApp:
 
         # Treeview for steps
         tree_frame = ttk.Frame(parent)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
+        tree_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=2)
 
         columns = ("#", "Name", "Title", "Status", "Prompt")
         self.step_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
@@ -359,6 +387,12 @@ class OrchestratorApp:
         self._step_context_menu.add_separator()
         self._step_context_menu.add_command(label="View Run History", command=self._view_step_run_history)
         self._step_context_menu.add_command(label="View History for This Step", command=self._view_history_for_step)
+
+        # Auto-mode status panel (hidden by default, shown when a session is active)
+        self._auto_mode_panel = tk.Frame(parent, relief=tk.GROOVE, bd=1)
+        self._build_auto_mode_panel_contents()
+        self._auto_mode_panel.grid(row=3, column=0, sticky="ew", padx=5, pady=(0, 2))
+        self._auto_mode_panel.grid_remove()
 
     def _build_output_viewer(self, parent: ttk.Frame):
         ttk.Label(parent, text="Step Result", font=("Segoe UI", 10, "bold")).pack(padx=5, pady=(5, 2), anchor=tk.W)
@@ -424,7 +458,8 @@ class OrchestratorApp:
                 lineage_suffix = f"  \u21b3 derived from {parent_name[:25]}"
             else:
                 lineage_suffix = ""
-            label = f"{badge} {p.name}  ({succeeded}/{total}){running}{lineage_suffix}"
+            am_prefix = "⚡ " if p.auto_mode_session_id else ""
+            label = f"{am_prefix}{badge} {p.name}  ({succeeded}/{total}){running}{lineage_suffix}"
             self.plan_listbox.insert(tk.END, label)
             list_idx = self.plan_listbox.size() - 1
             self.plan_listbox.itemconfig(list_idx, fg=fg_color)
@@ -1310,6 +1345,220 @@ class OrchestratorApp:
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert("1.0", text)
         self.output_text.config(state=tk.DISABLED)
+
+    # ── Auto-mode Panel Contents ──────────────────────────────────
+
+    def _build_auto_mode_panel_contents(self) -> None:
+        panel = self._auto_mode_panel
+
+        self._auto_mode_header = tk.Label(
+            panel, text="⚡ Auto-mode active",
+            bg="#4CAF50", fg="white", font=("Segoe UI", 9, "bold"),
+            anchor=tk.W, padx=8, pady=3,
+        )
+        self._auto_mode_header.pack(fill=tk.X)
+
+        log_frame = ttk.Frame(panel)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        self._auto_mode_log = tk.Text(
+            log_frame, height=4, wrap=tk.WORD, state=tk.DISABLED,
+            font=("Consolas", 8), bg="#FAFAFA",
+        )
+        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL,
+                                    command=self._auto_mode_log.yview)
+        self._auto_mode_log.configure(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._auto_mode_log.pack(fill=tk.BOTH, expand=True)
+
+        bottom = ttk.Frame(panel)
+        bottom.pack(fill=tk.X)
+        self._auto_mode_countdown_var = tk.StringVar(value="")
+        tk.Label(
+            bottom, textvariable=self._auto_mode_countdown_var,
+            fg="#D32F2F", font=("Segoe UI", 9),
+        ).pack(side=tk.LEFT, padx=5, pady=2)
+        self._auto_mode_stop_btn = ttk.Button(
+            bottom, text="Stop", command=self._stop_auto_mode,
+        )
+        self._auto_mode_stop_btn.pack(side=tk.RIGHT, padx=5, pady=2)
+
+    # ── Auto-mode Actions ─────────────────────────────────────────
+
+    def _check_interrupted_sessions(self) -> None:
+        running = [
+            s for s in self.db.get_recent_auto_mode_sessions(limit=100)
+            if s.status == "running"
+        ]
+        for s in running:
+            s.status = "error"
+            s.last_error = "Session interrupted by application restart"
+            self.db.update_auto_mode_session(s)
+        if running:
+            messagebox.showwarning(
+                "Auto-mode Recovery",
+                f"{len(running)} auto-mode session(s) were interrupted by a restart "
+                "and have been marked as 'error'.",
+            )
+
+    def _start_auto_mode(self) -> None:
+        if self._auto_mode_orchestrator:
+            messagebox.showwarning("Auto-mode", "An auto-mode session is already running.")
+            return
+        default_root = self.current_plan.project_root if self.current_plan else ""
+
+        def _on_start(directive: str, project_root: str) -> None:
+            session = self.db.create_auto_mode_session(directive, project_root)
+            callbacks = AutoModeCallbacks(
+                on_status_change=lambda s: self._auto_mode_ui_queue.put(("am_status", s)),
+                on_batch_started=lambda b, steps: self._auto_mode_ui_queue.put(
+                    ("am_batch_started", (b, len(steps)))
+                ),
+                on_step_started=lambda idx, title: self._auto_mode_ui_queue.put(
+                    ("am_step_started", (idx, title))
+                ),
+                on_step_completed=lambda idx, title, exc: self._auto_mode_ui_queue.put(
+                    ("am_step_completed", (idx, title, exc))
+                ),
+                on_step_failed=lambda idx, title, err: self._auto_mode_ui_queue.put(
+                    ("am_step_failed", (idx, title, err))
+                ),
+                on_retry_countdown=lambda rem: self._auto_mode_ui_queue.put(
+                    ("am_countdown", rem)
+                ),
+                on_batch_completed=lambda b, succ, fail: self._auto_mode_ui_queue.put(
+                    ("am_batch_completed", (b, succ, fail))
+                ),
+                on_log=lambda msg: self._auto_mode_ui_queue.put(("am_log", msg)),
+                on_session_ended=lambda reason: self._auto_mode_ui_queue.put(
+                    ("am_ended", reason)
+                ),
+            )
+            self._auto_mode_orchestrator = AutoModeOrchestrator(
+                session, self.db, self.config, callbacks
+            )
+            self._auto_mode_session = session
+            self._auto_mode_status = "starting"
+            self._auto_mode_current_batch = 1
+            self._auto_mode_current_step = 0
+            self._auto_mode_total_steps = 0
+            self._show_auto_mode_panel()
+            self._auto_mode_menu.entryconfig(0, state=tk.DISABLED)
+            self._auto_mode_menu.entryconfig(1, state=tk.NORMAL)
+            self._auto_mode_orchestrator.start()
+            self._start_auto_mode_polling()
+
+        AutoModeDialog(self.root, start_callback=_on_start, default_project_root=default_root)
+
+    def _stop_auto_mode(self) -> None:
+        if self._auto_mode_orchestrator:
+            self._auto_mode_orchestrator.stop()
+            self._auto_mode_stop_btn.config(
+                text="Stopping… (waiting for step)", state=tk.DISABLED
+            )
+
+    def _view_auto_mode_sessions(self) -> None:
+        AutoModeSessionViewer(self.root, self.db)
+
+    def _show_auto_mode_panel(self) -> None:
+        self._auto_mode_panel.grid()
+
+    def _hide_auto_mode_panel(self) -> None:
+        self._auto_mode_panel.grid_remove()
+        self._auto_mode_countdown_var.set("")
+        self._auto_mode_stop_btn.config(text="Stop", state=tk.NORMAL)
+
+    def _update_auto_mode_header(self) -> None:
+        batch = self._auto_mode_current_batch
+        step = self._auto_mode_current_step
+        total = self._auto_mode_total_steps
+        if self._auto_mode_status == "waiting_retry":
+            bg = "#FF9800"
+            text = f"⚡ Auto-mode waiting to retry - Batch {batch}"
+        else:
+            bg = "#4CAF50"
+            text = f"⚡ Auto-mode active - Batch {batch} - Step {step}/{total}"
+        self._auto_mode_header.config(text=text, bg=bg)
+
+    def _auto_mode_log_message(self, msg: str) -> None:
+        self._auto_mode_log.config(state=tk.NORMAL)
+        self._auto_mode_log.insert(tk.END, msg + "\n")
+        line_count = int(self._auto_mode_log.index("end-1c").split(".")[0])
+        if line_count > 20:
+            self._auto_mode_log.delete("1.0", f"{line_count - 20}.0")
+        self._auto_mode_log.see(tk.END)
+        self._auto_mode_log.config(state=tk.DISABLED)
+
+    def _handle_auto_mode_message(self, msg_type: str, data) -> None:
+        if msg_type == "am_status":
+            self._auto_mode_status = data
+            self._update_auto_mode_header()
+
+        elif msg_type == "am_batch_started":
+            batch_num, step_count = data
+            self._auto_mode_current_batch = batch_num
+            self._auto_mode_current_step = 0
+            self._auto_mode_total_steps = step_count
+            self._auto_mode_log_message(f"Batch {batch_num} started ({step_count} steps)")
+            self._update_auto_mode_header()
+            self._load_plans()
+
+        elif msg_type == "am_step_started":
+            idx, title = data
+            self._auto_mode_current_step = idx + 1
+            self._auto_mode_log_message(
+                f"  Step {idx + 1}/{self._auto_mode_total_steps}: {title}"
+            )
+            self._update_auto_mode_header()
+
+        elif msg_type == "am_step_completed":
+            _idx, title, _excerpt = data
+            self._auto_mode_log_message(f"  ✓ {title}")
+
+        elif msg_type == "am_step_failed":
+            _idx, title, error = data
+            self._auto_mode_log_message(f"  ✗ {title}: {error[:80]}")
+
+        elif msg_type == "am_countdown":
+            remaining = data
+            mins, secs = divmod(remaining, 60)
+            self._auto_mode_countdown_var.set(
+                f"Retrying in {mins}:{secs:02d} (usage limit reached)"
+            )
+
+        elif msg_type == "am_batch_completed":
+            batch, succeeded, _failed = data
+            self._auto_mode_log_message(f"Batch {batch} completed: {succeeded} succeeded")
+            self._auto_mode_countdown_var.set("")
+            self._load_plans()
+
+        elif msg_type == "am_log":
+            self._auto_mode_log_message(data)
+
+        elif msg_type == "am_ended":
+            session = self._auto_mode_session
+            batches = max(0, session.current_batch - 1) if session else 0
+            steps = session.total_steps_executed if session else 0
+            self._hide_auto_mode_panel()
+            self._auto_mode_orchestrator = None
+            self._auto_mode_menu.entryconfig(0, state=tk.NORMAL)
+            self._auto_mode_menu.entryconfig(1, state=tk.DISABLED)
+            self._show_toast(
+                f"Auto-mode stopped after {batches} batch(es), {steps} total steps"
+            )
+            self._load_plans()
+
+    def _start_auto_mode_polling(self) -> None:
+        self._poll_auto_mode_queue()
+
+    def _poll_auto_mode_queue(self) -> None:
+        try:
+            while True:
+                msg_type, data = self._auto_mode_ui_queue.get_nowait()
+                self._handle_auto_mode_message(msg_type, data)
+        except queue.Empty:
+            pass
+        if self._auto_mode_orchestrator is not None:
+            self.root.after(200, self._poll_auto_mode_queue)
 
 
 def main():
