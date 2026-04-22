@@ -15,6 +15,8 @@ DEFAULTS = {
     "enable_history_tool": True,
     "db_path": "orchestrator.db",
     "permission_mode": "override",
+    "build_command": "dotnet build",
+    "auto_fix_build": True,
 }
 
 
@@ -29,6 +31,8 @@ class Config:
     enable_history_tool: bool = True
     db_path: str = "orchestrator.db"
     permission_mode: str = "override"
+    build_command: str = "dotnet build"
+    auto_fix_build: bool = True
 
 
 def load_config(path: str = "config.json") -> Config:
