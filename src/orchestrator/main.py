@@ -408,6 +408,8 @@ class OrchestratorApp:
         self.plan_listbox.delete(0, tk.END)
         self._filtered_plan_indices: list[int] = []
 
+        parent_name_map = {p.id: p.name for p in self._plans}
+
         for i, p in enumerate(self._plans):
             if search and search not in p.name.lower():
                 continue
@@ -416,9 +418,13 @@ class OrchestratorApp:
             badge, fg_color = self._get_plan_status_badge(p, steps)
             succeeded = sum(1 for s in steps if s.status == StepStatus.SUCCEEDED)
             total = len(steps)
-            lineage_prefix = "\u2514\u2500 " if p.parent_plan_id else ""
             running = " [RUNNING]" if p.id in self._plan_executions else ""
-            label = f"{badge} {lineage_prefix}{p.name}  ({succeeded}/{total}){running}"
+            if p.parent_plan_id:
+                parent_name = parent_name_map.get(p.parent_plan_id, "?")
+                lineage_suffix = f"  \u21b3 derived from {parent_name[:25]}"
+            else:
+                lineage_suffix = ""
+            label = f"{badge} {p.name}  ({succeeded}/{total}){running}{lineage_suffix}"
             self.plan_listbox.insert(tk.END, label)
             list_idx = self.plan_listbox.size() - 1
             self.plan_listbox.itemconfig(list_idx, fg=fg_color)
