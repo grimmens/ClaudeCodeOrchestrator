@@ -2,7 +2,7 @@ import json
 import unittest
 
 from src.orchestrator.database import Database
-from src.orchestrator.models import AgentRun, Plan, PlanHistory, PlanStep, StepStatus
+from src.orchestrator.models import AgentRun, AutoModeSession, Plan, PlanHistory, PlanStep, StepStatus
 
 
 class TestDatabasePlans(unittest.TestCase):
@@ -221,6 +221,84 @@ class TestDatabasePlanHistory(unittest.TestCase):
     def test_parent_plan_id_null_by_default(self):
         fetched = self.db.get_plan(self.plan.id)
         self.assertIsNone(fetched.parent_plan_id)
+
+
+class TestAutoModeSessions(unittest.TestCase):
+    def setUp(self):
+        self.db = Database(":memory:")
+
+    def test_create_and_get_session(self):
+        session = self.db.create_auto_mode_session("Build a REST API", "/tmp/project")
+        self.assertIsNotNone(session.id)
+        self.assertEqual(session.directive, "Build a REST API")
+        self.assertEqual(session.project_root, "/tmp/project")
+        self.assertEqual(session.status, "running")
+        self.assertEqual(session.current_batch, 1)
+        self.assertEqual(session.total_steps_executed, 0)
+        self.assertIsNone(session.last_error)
+
+        fetched = self.db.get_auto_mode_session(session.id)
+        self.assertIsNotNone(fetched)
+        self.assertEqual(fetched.directive, "Build a REST API")
+        self.assertEqual(fetched.status, "running")
+
+    def test_update_session(self):
+        session = self.db.create_auto_mode_session("Refactor codebase", "/tmp/proj")
+        session.status = "completed"
+        session.current_batch = 3
+        session.total_steps_executed = 12
+        session.last_error = None
+        self.db.update_auto_mode_session(session)
+
+        fetched = self.db.get_auto_mode_session(session.id)
+        self.assertEqual(fetched.status, "completed")
+        self.assertEqual(fetched.current_batch, 3)
+        self.assertEqual(fetched.total_steps_executed, 12)
+
+    def test_update_session_with_error(self):
+        session = self.db.create_auto_mode_session("Add tests", "/tmp/proj")
+        session.status = "error"
+        session.last_error = "Build failed with exit code 1"
+        self.db.update_auto_mode_session(session)
+
+        fetched = self.db.get_auto_mode_session(session.id)
+        self.assertEqual(fetched.status, "error")
+        self.assertEqual(fetched.last_error, "Build failed with exit code 1")
+
+    def test_get_nonexistent_session(self):
+        result = self.db.get_auto_mode_session("nonexistent-id")
+        self.assertIsNone(result)
+
+    def test_get_recent_sessions(self):
+        s1 = self.db.create_auto_mode_session("Task 1", "/p1")
+        s2 = self.db.create_auto_mode_session("Task 2", "/p2")
+        s3 = self.db.create_auto_mode_session("Task 3", "/p3")
+
+        sessions = self.db.get_recent_auto_mode_sessions(limit=10)
+        self.assertEqual(len(sessions), 3)
+        # Most recent first
+        directives = [s.directive for s in sessions]
+        self.assertEqual(directives[0], "Task 3")
+
+    def test_get_recent_sessions_limit(self):
+        for i in range(5):
+            self.db.create_auto_mode_session(f"Task {i}", "/p")
+        sessions = self.db.get_recent_auto_mode_sessions(limit=3)
+        self.assertEqual(len(sessions), 3)
+
+    def test_plan_linked_to_session(self):
+        session = self.db.create_auto_mode_session("Auto directive", "/repo")
+        plan = Plan(name="Batch 1", project_root="/repo")
+        self.db.create_plan(plan, auto_mode_session_id=session.id)
+
+        fetched = self.db.get_plan(plan.id)
+        self.assertEqual(fetched.auto_mode_session_id, session.id)
+
+    def test_plan_auto_mode_session_id_null_by_default(self):
+        plan = Plan(name="Normal Plan", project_root="/p")
+        self.db.create_plan(plan)
+        fetched = self.db.get_plan(plan.id)
+        self.assertIsNone(fetched.auto_mode_session_id)
 
 
 if __name__ == "__main__":

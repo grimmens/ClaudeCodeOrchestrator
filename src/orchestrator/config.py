@@ -5,6 +5,20 @@ from dataclasses import asdict, dataclass, field
 
 ALL_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 
+_AUTO_MODE_STEP_GENERATION_PROMPT = (
+    "Output a JSON array of step objects. Each step must have these fields: "
+    "name (short identifier, snake_case), title (brief human-readable title), "
+    "prompt (detailed instructions for the Claude agent to implement this step), "
+    "description (one-sentence summary). Each step should represent one concrete, "
+    "self-contained implementation task."
+)
+
+_AUTO_MODE_CLAUDE_MD_UPDATE_PROMPT = (
+    "Review the current CLAUDE.md file and update it to reflect any architectural changes, "
+    "new conventions, or important implementation details added in the most recent batch of steps. "
+    "Keep the file concise and focused on information that helps future agents understand the codebase."
+)
+
 DEFAULTS = {
     "max_budget_usd": 5.0,
     "max_turns": 50,
@@ -17,6 +31,10 @@ DEFAULTS = {
     "permission_mode": "override",
     "build_command": "dotnet build",
     "auto_fix_build": True,
+    "auto_mode_batch_size": 5,
+    "auto_mode_retry_wait_seconds": 600,
+    "auto_mode_step_generation_prompt": _AUTO_MODE_STEP_GENERATION_PROMPT,
+    "auto_mode_claude_md_update_prompt": _AUTO_MODE_CLAUDE_MD_UPDATE_PROMPT,
 }
 
 
@@ -33,6 +51,10 @@ class Config:
     permission_mode: str = "override"
     build_command: str = "dotnet build"
     auto_fix_build: bool = True
+    auto_mode_batch_size: int = 5
+    auto_mode_retry_wait_seconds: int = 600
+    auto_mode_step_generation_prompt: str = _AUTO_MODE_STEP_GENERATION_PROMPT
+    auto_mode_claude_md_update_prompt: str = _AUTO_MODE_CLAUDE_MD_UPDATE_PROMPT
 
 
 def load_config(path: str = "config.json") -> Config:

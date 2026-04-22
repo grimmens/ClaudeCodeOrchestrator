@@ -8,7 +8,7 @@ class SettingsDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, config: Config, on_saved=None):
         super().__init__(parent)
         self.title("Settings")
-        self.geometry("540x490")
+        self.geometry("540x570")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -115,6 +115,25 @@ class SettingsDialog(tk.Toplevel):
             row=row, column=1, sticky=tk.W, **pad)
         row += 1
 
+        ttk.Separator(frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, pady=8)
+        row += 1
+
+        ttk.Label(frame, text="Auto Mode", font=("", 9, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W, **pad)
+        row += 1
+
+        ttk.Label(frame, text="Batch Size (steps per batch):").grid(row=row, column=0, sticky=tk.W, **pad)
+        self.auto_batch_size_var = tk.IntVar()
+        ttk.Spinbox(frame, textvariable=self.auto_batch_size_var, from_=1, to=50, increment=1, width=10).grid(
+            row=row, column=1, sticky=tk.W, **pad)
+        row += 1
+
+        ttk.Label(frame, text="Retry Wait (seconds):").grid(row=row, column=0, sticky=tk.W, **pad)
+        self.auto_retry_wait_var = tk.IntVar()
+        ttk.Spinbox(frame, textvariable=self.auto_retry_wait_var, from_=0, to=3600, increment=60, width=10).grid(
+            row=row, column=1, sticky=tk.W, **pad)
+        row += 1
+
         # Buttons
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
@@ -130,6 +149,8 @@ class SettingsDialog(tk.Toplevel):
         self.history_tool_var.set(self.config.enable_history_tool)
         self.db_var.set(self.config.db_path)
         self.perm_mode_var.set(self.config.permission_mode)
+        self.auto_batch_size_var.set(self.config.auto_mode_batch_size)
+        self.auto_retry_wait_var.set(self.config.auto_mode_retry_wait_seconds)
 
         # Set tool checkboxes from allowed_tools string
         enabled_tools = set(self.config.allowed_tools.split())
@@ -160,6 +181,9 @@ class SettingsDialog(tk.Toplevel):
         # Build allowed_tools string from checkboxes
         selected = [tool for tool, var in self.tool_vars.items() if var.get()]
         self.config.allowed_tools = " ".join(selected)
+
+        self.config.auto_mode_batch_size = self.auto_batch_size_var.get()
+        self.config.auto_mode_retry_wait_seconds = self.auto_retry_wait_var.get()
 
         save_config(self.config)
         if self.on_saved:

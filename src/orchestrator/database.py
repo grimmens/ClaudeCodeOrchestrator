@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime
 from typing import List, Optional
 
-from .models import AgentRun, Plan, PlanHistory, PlanStep, StepStatus
+from .models import AgentRun, AutoModeSession, Plan, PlanHistory, PlanStep, StepStatus
 
 
 class Database:
@@ -67,6 +67,17 @@ class Database:
                 created_from_plan_id TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS auto_mode_sessions (
+                id TEXT PRIMARY KEY,
+                directive TEXT NOT NULL,
+                project_root TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_batch INTEGER DEFAULT 1,
+                total_steps_executed INTEGER DEFAULT 0,
+                last_error TEXT
+            );
         """)
         self.conn.commit()
 
@@ -77,12 +88,23 @@ class Database:
         except sqlite3.OperationalError:
             pass  # Column already exists
 
+        # Add auto_mode_session_id column if it doesn't exist (idempotent migration)
+        try:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN auto_mode_session_id TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
     # -- Plans --
 
-    def create_plan(self, plan: Plan) -> Plan:
+    def create_plan(self, plan: Plan, auto_mode_session_id: str | None = None) -> Plan:
+        if auto_mode_session_id is not None:
+            plan.auto_mode_session_id = auto_mode_session_id
         self.conn.execute(
-            "INSERT INTO plans (id, name, project_root, created_at, parent_plan_id) VALUES (?, ?, ?, ?, ?)",
-            (plan.id, plan.name, plan.project_root, plan.created_at, plan.parent_plan_id),
+            "INSERT INTO plans (id, name, project_root, created_at, parent_plan_id, auto_mode_session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (plan.id, plan.name, plan.project_root, plan.created_at,
+             plan.parent_plan_id, plan.auto_mode_session_id),
         )
         self.conn.commit()
         return plan
@@ -279,6 +301,46 @@ class Database:
     def delete_template(self, template_id: str) -> None:
         self.conn.execute("DELETE FROM plan_templates WHERE id = ?", (template_id,))
         self.conn.commit()
+
+    # -- Auto Mode Sessions --
+
+    def create_auto_mode_session(self, directive: str, project_root: str) -> AutoModeSession:
+        import uuid
+        session = AutoModeSession(
+            id=str(uuid.uuid4()),
+            directive=directive,
+            project_root=project_root,
+            created_at=datetime.now().isoformat(),
+            status="running",
+        )
+        self.conn.execute(
+            "INSERT INTO auto_mode_sessions "
+            "(id, directive, project_root, created_at, status, current_batch, total_steps_executed, last_error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (session.id, session.directive, session.project_root, session.created_at,
+             session.status, session.current_batch, session.total_steps_executed, session.last_error),
+        )
+        self.conn.commit()
+        return session
+
+    def update_auto_mode_session(self, session: AutoModeSession) -> None:
+        self.conn.execute(
+            "UPDATE auto_mode_sessions SET status=?, current_batch=?, total_steps_executed=?, last_error=? WHERE id=?",
+            (session.status, session.current_batch, session.total_steps_executed, session.last_error, session.id),
+        )
+        self.conn.commit()
+
+    def get_auto_mode_session(self, session_id: str) -> Optional[AutoModeSession]:
+        row = self.conn.execute(
+            "SELECT * FROM auto_mode_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        return AutoModeSession(**dict(row)) if row else None
+
+    def get_recent_auto_mode_sessions(self, limit: int = 10) -> List[AutoModeSession]:
+        rows = self.conn.execute(
+            "SELECT * FROM auto_mode_sessions ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [AutoModeSession(**dict(r)) for r in rows]
 
     @staticmethod
     def _row_to_step(row) -> PlanStep:

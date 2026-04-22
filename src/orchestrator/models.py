@@ -22,6 +22,7 @@ class Plan:
     project_root: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     parent_plan_id: Optional[str] = None
+    auto_mode_session_id: Optional[str] = None
 
 
 @dataclass
@@ -45,6 +46,18 @@ class PlanHistory:
     snapshot_at: str = field(default_factory=lambda: datetime.now().isoformat())
     summary: Optional[str] = None
     steps_json: str = "[]"
+
+
+@dataclass
+class AutoModeSession:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    directive: str = ""
+    project_root: str = ""
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    status: str = "running"
+    current_batch: int = 1
+    total_steps_executed: int = 0
+    last_error: Optional[str] = None
 
 
 @dataclass
