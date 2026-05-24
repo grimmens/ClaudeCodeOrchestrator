@@ -130,9 +130,14 @@ class Orchestrator:
             if prefix:
                 full_prompt = prefix + "TASK:\n" + step.prompt + VERIFY_SUFFIX
 
-        # Run Claude
-        exit_code, stdout, stderr = claude_runner.run_claude(
-            full_prompt, working_dir, self.config
+        # Run Claude (output is streamed to on_output line-by-line)
+        exit_code, stdout, stderr = claude_runner.run_claude_streaming(
+            full_prompt,
+            working_dir,
+            self.config,
+            on_output=on_output,
+            cancel_event=cancel_event,
+            inactivity_timeout=getattr(self.config, "inactivity_timeout_seconds", 0),
         )
 
         finished_at = datetime.now().isoformat()
@@ -140,7 +145,15 @@ class Orchestrator:
         if stderr:
             output_text += f"\n--- STDERR ---\n{stderr}"
 
-        on_output(output_text)
+        # If the user cancelled mid-step, don't mark as failed — leave it pending so it can be re-run.
+        if cancel_event.is_set():
+            step.status = StepStatus.PENDING
+            step.result = output_text
+            self.db.update_step(step)
+            self._create_run_record(step, started_at, finished_at, "cancelled",
+                                    output_text, "Cancelled by user", exit_code)
+            on_output("\n[Step CANCELLED]\n")
+            return
 
         if exit_code == 0:
             step.status = StepStatus.SUCCEEDED

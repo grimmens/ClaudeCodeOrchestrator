@@ -161,7 +161,7 @@ class TestAutoSnapshot(unittest.TestCase):
     @patch("src.orchestrator.services.orchestrator.cleanup_claude_md_hint")
     def test_auto_snapshot_created_after_queue_run(self, mock_cleanup_md, mock_cleanup_hist,
                                                     mock_inject, mock_write_hist, mock_runner):
-        mock_runner.run_claude.return_value = (0, "Step output", "")
+        mock_runner.run_claude_streaming.return_value = (0, "Step output", "")
         config = Config(enable_history_tool=False)
         orch = Orchestrator(self.db, config)
 

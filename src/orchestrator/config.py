@@ -15,6 +15,7 @@ DEFAULTS = {
     "enable_history_tool": True,
     "db_path": "orchestrator.db",
     "permission_mode": "override",
+    "inactivity_timeout_seconds": 600,
 }
 
 
@@ -29,6 +30,7 @@ class Config:
     enable_history_tool: bool = True
     db_path: str = "orchestrator.db"
     permission_mode: str = "override"
+    inactivity_timeout_seconds: int = 600
 
 
 def load_config(path: str = "config.json") -> Config:
